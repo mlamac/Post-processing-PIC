@@ -7,7 +7,9 @@ Based on the working post-process-lwfa.py script structure.
 
 Usage:
     1. Edit CONFIG below to match your simulation parameters
-    2. Run: python process_epoch_lwfa.py
+    2. For real EPOCH data: Run in directory with SDF files
+    3. For synthetic data: Set data_mode='synthetic' and provide data_file path
+    4. Run: python process_epoch_lwfa.py
 
 Output:
     - post-process-output/*.npy: Processed data arrays
@@ -26,22 +28,34 @@ from pipeline.loaders import EPOCHLoader
 from pipeline.processors import DataProcessor
 from pipeline.visualizers import EPOCHVisualizer
 from utils.physics import compute_derived_quantities
-from utils.hpc import progress_bar, print_section, print_parameter_summary, create_output_directory
+from utils.hpc import (progress_bar, find_sdf_files, print_section,
+                       print_parameter_summary, create_output_directory,
+                       get_filename_from_pattern)
 
 # =============================================================================
 # USER CONFIGURATION
 # =============================================================================
 
 CONFIG = {
+    # Data mode: 'synthetic' or 'sdf'
+    'data_mode': 'synthetic',  # Change to 'sdf' for real EPOCH data
+
+    # === SYNTHETIC DATA MODE ===
+    # Single HDF5 file (for testing with synthetic data)
+    'data_file': 'examples/data/epoch_lwfa_example.h5',
+
+    # === SDF MODE ===
+    # File patterns for real EPOCH SDF files (script runs in SDF directory)
+    'dens_pattern': 'dens*.sdf',
+    'efield_pattern': 'E_field{:04d}.sdf',
+    'ener_pattern': 'ener{:04d}.sdf',
+
     # Laser parameters
     'lambda0_um': 1.0,              # Laser wavelength in microns
     'a0': 3.0,                      # Normalized vector potential
 
     # Plasma parameters
     'n_over_nc': 0.0025,            # Plasma density as fraction of critical density
-
-    # Data file (for synthetic data testing)
-    'data_file': 'examples/data/epoch_lwfa_example.h5',
 
     # Processing options
     'downsample_x': 10,             # Spatial downsampling factor (x)
@@ -68,7 +82,8 @@ CONFIG = {
     'output_prefix': 'lwfa_q3d',
 
     # Particle species
-    'species': 'He_electron',
+    'species': 'He_electron',       # For synthetic data
+    # 'species': 'electron',        # For real EPOCH data (uncomment and adjust)
 }
 
 # =============================================================================
@@ -80,14 +95,17 @@ def process_single_frame(filepath, params, config):
     Process a single frame.
 
     Args:
-        filepath: Path to data file
+        filepath: Path to data file (SDF or HDF5)
         params: Dict from compute_derived_quantities()
         config: CONFIG dict
 
     Returns:
         Dict with processed frame data
     """
-    loader = EPOCHLoader(filepath, use_sdf_helper=False)  # Use HDF5 for synthetic data
+    # Determine if using sdf_helper or HDF5
+    use_sdf = config['data_mode'] == 'sdf'
+
+    loader = EPOCHLoader(filepath, use_sdf_helper=use_sdf)
 
     frame = loader.load_frame(
         params=params,
@@ -172,10 +190,72 @@ def process_all_frames(data_files, params, config):
     }
 
 
+def find_data_files(config):
+    """
+    Find data files based on configuration mode.
+
+    Args:
+        config: CONFIG dict
+
+    Returns:
+        List of file paths to process
+    """
+    if config['data_mode'] == 'synthetic':
+        # Single synthetic data file
+        data_file = Path(config['data_file'])
+        if not data_file.exists():
+            print(f"ERROR: Data file not found: {data_file}")
+            print("Run generate_epoch_data.py first to create synthetic data.")
+            sys.exit(1)
+        return [data_file]
+
+    elif config['data_mode'] == 'sdf':
+        # Multiple SDF files - find by pattern
+        indices = find_sdf_files(config['dens_pattern'])
+
+        if not indices:
+            print(f"ERROR: No SDF files found matching pattern: {config['dens_pattern']}")
+            print("Make sure you are running this script in the directory with SDF files.")
+            print(f"Current directory: {os.getcwd()}")
+            print(f"Files in directory: {list(Path('.').glob('*.sdf'))[:5]}")
+            sys.exit(1)
+
+        print(f"Found {len(indices)} frames: {indices[0]:04d} to {indices[-1]:04d}")
+
+        # Build list of E_field files (main data source)
+        data_files = []
+        for idx in indices:
+            efield_file = get_filename_from_pattern(config['efield_pattern'], idx)
+            if Path(efield_file).exists():
+                data_files.append(efield_file)
+            else:
+                print(f"WARNING: Missing {efield_file}, skipping frame {idx}")
+
+        if not data_files:
+            print("ERROR: No E_field files found!")
+            sys.exit(1)
+
+        return data_files
+
+    else:
+        print(f"ERROR: Unknown data_mode: {config['data_mode']}")
+        print("Set data_mode to 'synthetic' or 'sdf'")
+        sys.exit(1)
+
+
 def main():
     """Main entry point"""
 
     print_section("EPOCH Quasi-3D LWFA Post-Processing")
+
+    # Show current mode
+    print(f"Data mode: {CONFIG['data_mode'].upper()}")
+    if CONFIG['data_mode'] == 'synthetic':
+        print(f"Data file: {CONFIG['data_file']}")
+    else:
+        print(f"SDF directory: {os.getcwd()}")
+        print(f"Patterns: dens={CONFIG['dens_pattern']}, efield={CONFIG['efield_pattern']}")
+    print()
 
     # Compute derived quantities
     params = compute_derived_quantities(CONFIG)
@@ -187,14 +267,7 @@ def main():
     print()
 
     # Find data files
-    data_file = Path(CONFIG['data_file'])
-    if not data_file.exists():
-        print(f"ERROR: Data file not found: {data_file}")
-        print("Run generate_epoch_data.py first to create synthetic data.")
-        sys.exit(1)
-
-    data_files = [data_file]  # Single file for now
-    print(f"Found {len(data_files)} frame(s) to process")
+    data_files = find_data_files(CONFIG)
     print()
 
     # Create output directory
