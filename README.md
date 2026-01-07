@@ -1,5 +1,9 @@
 # PIC Post-Processing Pipeline
 
+> ⚠️ **WORK IN PROGRESS - CURRENTLY NOT FUNCTIONAL**
+> This pipeline is under active development and is not yet working properly.
+> Please refer to `working-script/post-process-lwfa.py` for a functional reference implementation.
+
 Comprehensive data processing and visualization pipeline for **EPOCH quasi-3D** Particle-in-Cell (PIC) simulations, with focus on Laser Wakefield Acceleration (LWFA).
 
 ## Features
