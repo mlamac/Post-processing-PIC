@@ -6,7 +6,7 @@ Supports loading SDF files using sdf_helper module and HDF5 for synthetic data.
 import os
 import numpy as np
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 import h5py
 
 # Try to import sdf_helper (compiled EPOCH utility)
