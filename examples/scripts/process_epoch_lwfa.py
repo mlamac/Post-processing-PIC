@@ -24,7 +24,7 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-from pipeline.loaders import EPOCHLoader
+from pipeline.loaders import EPOCHLoader, load_epoch_frame
 from pipeline.processors import DataProcessor
 from pipeline.visualizers import EPOCHVisualizer
 from utils.physics import compute_derived_quantities
@@ -90,31 +90,32 @@ CONFIG = {
 # MAIN PROCESSING
 # =============================================================================
 
-def process_single_frame(filepath, params, config):
+def process_single_frame(filepath_or_index, params, config):
     """
     Process a single frame.
 
     Args:
-        filepath: Path to data file (SDF or HDF5)
+        filepath_or_index: For synthetic mode: file path. For SDF mode: frame index.
         params: Dict from compute_derived_quantities()
         config: CONFIG dict
 
     Returns:
         Dict with processed frame data
     """
-    # Determine if using sdf_helper or HDF5
-    use_sdf = config['data_mode'] == 'sdf'
-
-    loader = EPOCHLoader(filepath, use_sdf_helper=use_sdf)
-
-    frame = loader.load_frame(
-        params=params,
-        downsample_x=config['downsample_x'],
-        downsample_r=config['downsample_r'],
-        species=config['species']
-    )
-
-    loader.close()
+    if config['data_mode'] == 'sdf':
+        # Use multi-file loader (matches working script convention)
+        # filepath_or_index is actually the frame index
+        frame = load_epoch_frame(filepath_or_index, config, params)
+    else:
+        # Synthetic mode: single file
+        loader = EPOCHLoader(filepath_or_index, use_sdf_helper=False)
+        frame = loader.load_frame(
+            params=params,
+            downsample_x=config['downsample_x'],
+            downsample_r=config['downsample_r'],
+            species=config['species']
+        )
+        loader.close()
 
     return frame
 
@@ -222,20 +223,33 @@ def find_data_files(config):
 
         print(f"Found {len(indices)} frames: {indices[0]:04d} to {indices[-1]:04d}")
 
-        # Build list of E_field files (main data source)
-        data_files = []
-        for idx in indices:
-            efield_file = get_filename_from_pattern(config['efield_pattern'], idx)
-            if Path(efield_file).exists():
-                data_files.append(efield_file)
-            else:
-                print(f"WARNING: Missing {efield_file}, skipping frame {idx}")
-
-        if not data_files:
-            print("ERROR: No E_field files found!")
+        # Verify required files exist for first frame
+        test_idx = indices[0]
+        dens_file = get_filename_from_pattern(config['dens_pattern'], test_idx)
+        efield_file = get_filename_from_pattern(config['efield_pattern'], test_idx)
+        ener_file = get_filename_from_pattern(config['ener_pattern'], test_idx)
+        
+        missing = []
+        if not Path(dens_file).exists():
+            missing.append(dens_file)
+        if not Path(efield_file).exists():
+            missing.append(efield_file)
+        if not Path(ener_file).exists():
+            missing.append(ener_file)
+        
+        if missing:
+            print(f"ERROR: Missing required files for frame {test_idx}:")
+            for f in missing:
+                print(f"  - {f}")
+            print("
+EPOCH typically outputs 3 files per frame:")
+            print(f"  - {config['dens_pattern']}")
+            print(f"  - {config['efield_pattern']}")
+            print(f"  - {config['ener_pattern']}")
             sys.exit(1)
 
-        return data_files
+        # Return frame indices (not file paths) for SDF mode
+        return indices
 
     else:
         print(f"ERROR: Unknown data_mode: {config['data_mode']}")

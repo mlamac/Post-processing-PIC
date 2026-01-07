@@ -431,6 +431,13 @@ class EPOCHLoader:
                    species: str = 'He_electron') -> Dict:
         """
         Load all data for a single frame (convenience method).
+        
+        NOTE: For real EPOCH data, you should load from separate files:
+          - E_field*.sdf contains fields and grid
+          - dens*.sdf contains density (optional, can try from E_field)
+          - ener*.sdf contains particles
+        
+        This method assumes all data is in the current file (for synthetic or single-file data).
 
         Args:
             params: Physical parameters dict from compute_derived_quantities()
@@ -443,8 +450,27 @@ class EPOCHLoader:
         """
         grid = self.load_grid(params)
         fields = self.load_electric_fields(params)
-        density = self.load_density(params)
-        particles = self.load_particles(species, params)
+        
+        # Try to load density (may not be in E_field file)
+        try:
+            density = self.load_density(params)
+        except (AttributeError, ValueError) as e:
+            print(f"Warning: Could not load density from this file: {e}")
+            print("For EPOCH data, density is typically in dens*.sdf files")
+            # Create dummy density
+            density = {'n_e': None, 'n_e_norm': None}
+        
+        # Try to load particles (may not be in E_field file)
+        try:
+            particles = self.load_particles(species, params)
+        except (AttributeError, ValueError) as e:
+            print(f"Warning: Could not load particles from this file: {e}")
+            print("For EPOCH data, particles are typically in ener*.sdf files")
+            particles = {
+                'x': np.array([]), 'r': np.array([]),
+                'px': np.array([]), 'pr': np.array([]),
+                'weight': np.array([])
+            }
 
         # Apply downsampling to field data
         ds_x = downsample_x
@@ -488,3 +514,82 @@ class EPOCHLoader:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+def load_epoch_frame(frame_index: int, config: Dict, params: Dict) -> Dict:
+    """
+    Load a complete EPOCH frame from multiple SDF files (matching working script convention).
+    
+    EPOCH typically outputs separate files per frame:
+      - dens{:04d}.sdf: Density data
+      - E_field{:04d}.sdf: Electric field modes and grid
+      - ener{:04d}.sdf: Particle/energy data
+    
+    Args:
+        frame_index: Frame number (e.g., 60 for dens0060.sdf)
+        config: CONFIG dict with file patterns
+        params: Physical parameters from compute_derived_quantities()
+    
+    Returns:
+        Dict with all frame data (fields, density, grid, particles)
+    
+    Example:
+        >>> frame = load_epoch_frame(60, CONFIG, params)
+        >>> n_e = frame['n_e']
+        >>> E_tot = frame['E_tot']
+    """
+    from .loaders import EPOCHLoader, reconstruct_field_from_modes
+    from ..utils.hpc import get_filename_from_pattern
+    
+    # Get filenames for this frame
+    dens_file = get_filename_from_pattern(config['dens_pattern'], frame_index)
+    efield_file = get_filename_from_pattern(config['efield_pattern'], frame_index)
+    ener_file = get_filename_from_pattern(config['ener_pattern'], frame_index)
+    
+    # Load E-field file (contains fields and grid)
+    loader_efield = EPOCHLoader(efield_file, use_sdf_helper=True)
+    fields = loader_efield.load_electric_fields(params)
+    grid = loader_efield.load_grid(params)
+    loader_efield.close()
+    
+    # Load density file
+    loader_dens = EPOCHLoader(dens_file, use_sdf_helper=True)
+    density = loader_dens.load_density(params)
+    loader_dens.close()
+    
+    # Load particle file
+    loader_ener = EPOCHLoader(ener_file, use_sdf_helper=True)
+    particles = loader_ener.load_particles(config.get('species', 'He_electron'), params)
+    loader_ener.close()
+    
+    # Apply downsampling
+    ds_x = config.get('downsample_x', 1)
+    ds_r = config.get('downsample_r', 1)
+    
+    result = {
+        'x': grid.get('x_norm', grid['x'])[::ds_x],
+        'r': grid.get('r_norm', grid['r'])[::ds_r],
+    }
+    
+    # Add downsampled fields (transposed for correct shape)
+    if 'E_x_norm' in fields:
+        result['E_x'] = fields['E_x_norm'][::ds_x, ::ds_r].T
+        result['E_tot'] = fields['E_tot_norm'][::ds_x, ::ds_r].T
+    else:
+        result['E_x'] = fields['E_x'][::ds_x, ::ds_r].T
+        result['E_tot'] = fields['E_tot'][::ds_x, ::ds_r].T
+    
+    # Add density
+    if 'n_e_norm' in density:
+        result['n_e'] = density['n_e_norm'][::ds_x, ::ds_r].T
+    else:
+        result['n_e'] = density['n_e'][::ds_x, ::ds_r].T
+    
+    # Add particles (use normalized if available)
+    result['x_particles'] = particles.get('x_norm', particles['x'])
+    result['r_particles'] = particles.get('r_norm', particles['r'])
+    result['px_particles'] = particles.get('px_norm', particles['px'])
+    result['pr_particles'] = particles.get('pr_norm', particles['pr'])
+    result['weight'] = particles['weight']
+    
+    return result
