@@ -260,27 +260,66 @@ Self-contained HTML file with embedded JavaScript animation. Can be:
 
 ## Working with Real EPOCH Data
 
+The script supports two modes via the `data_mode` configuration:
+
+### **Mode 1: Synthetic Data (Default for Testing)**
+
+```python
+CONFIG = {
+    'data_mode': 'synthetic',
+    'data_file': 'examples/data/epoch_lwfa_example.h5',
+    # ... other parameters
+}
+```
+
+### **Mode 2: Real EPOCH SDF Files**
+
 When processing actual EPOCH simulations:
 
-1. **Set up file patterns** in CONFIG:
-   ```python
-   CONFIG['dens_pattern'] = 'dens*.sdf'
-   CONFIG['efield_pattern'] = 'E_field{:04d}.sdf'
-   CONFIG['ener_pattern'] = 'ener{:04d}.sdf'
-   ```
-
-2. **Run in simulation directory**:
+1. **Copy script to your EPOCH output directory**:
    ```bash
    cd /path/to/epoch/output
    cp /path/to/process_epoch_lwfa.py .
-   # Edit CONFIG in script
+   ```
+
+2. **Edit CONFIG in the script**:
+   ```python
+   CONFIG = {
+       'data_mode': 'sdf',  # ← Change from 'synthetic' to 'sdf'
+       
+       # File patterns (adjust if your EPOCH uses different naming)
+       'dens_pattern': 'dens*.sdf',
+       'efield_pattern': 'E_field{:04d}.sdf',
+       'ener_pattern': 'ener{:04d}.sdf',
+       
+       # Your simulation parameters
+       'lambda0_um': 0.8,              # e.g., 800 nm Ti:Sapphire
+       'a0': 2.5,
+       'n_over_nc': 0.01,
+       
+       # Particle species (adjust to match your EPOCH output)
+       'species': 'electron',          # or 'He_electron', 'proton', etc.
+       
+       # ... rest of config
+   }
+   ```
+
+3. **Compile and enable sdf_helper**:
+   ```bash
+   cd /path/to/epoch/epoch2d
+   make sdfutils
+   export PYTHONPATH="/path/to/epoch/epoch2d/SDF/utilities:$PYTHONPATH"
+   ```
+
+4. **Run the script** (in the directory with SDF files):
+   ```bash
    python process_epoch_lwfa.py
    ```
 
-3. **Enable sdf_helper**:
-   ```python
-   loader = EPOCHLoader('E_field0060.sdf', use_sdf_helper=True)
-   ```
+The script automatically:
+- Finds all matching SDF files by pattern
+- Switches to `use_sdf_helper=True` for SDF mode
+- Processes all frames into a single animation
 
 ## Quasi-3D Modal Field Reconstruction
 
