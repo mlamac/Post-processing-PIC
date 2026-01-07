@@ -241,8 +241,7 @@ def find_data_files(config):
             print(f"ERROR: Missing required files for frame {test_idx}:")
             for f in missing:
                 print(f"  - {f}")
-            print("
-EPOCH typically outputs 3 files per frame:")
+            print("\nEPOCH typically outputs 3 files per frame:")
             print(f"  - {config['dens_pattern']}")
             print(f"  - {config['efield_pattern']}")
             print(f"  - {config['ener_pattern']}")

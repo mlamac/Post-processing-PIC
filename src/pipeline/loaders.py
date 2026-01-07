@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 import h5py
 
+# Import utilities
+from utils.hpc import get_filename_from_pattern
+
 # Try to import sdf_helper (compiled EPOCH utility)
 try:
     import sdf_helper as sh
@@ -538,9 +541,6 @@ def load_epoch_frame(frame_index: int, config: Dict, params: Dict) -> Dict:
         >>> n_e = frame['n_e']
         >>> E_tot = frame['E_tot']
     """
-    from .loaders import EPOCHLoader, reconstruct_field_from_modes
-    from ..utils.hpc import get_filename_from_pattern
-    
     # Get filenames for this frame
     dens_file = get_filename_from_pattern(config['dens_pattern'], frame_index)
     efield_file = get_filename_from_pattern(config['efield_pattern'], frame_index)
