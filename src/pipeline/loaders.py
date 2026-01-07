@@ -1,321 +1,413 @@
 """
-Data loaders for PIC simulation outputs.
-Supports EPOCH (SDF) and Smilei (HDF5) formats.
+Data loaders for EPOCH quasi-3D PIC simulations.
+Supports loading SDF files using sdf_helper module and HDF5 for synthetic data.
 """
 
 import os
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Dict, Optional, List, Union
 import numpy as np
+from pathlib import Path
+from typing import Dict, Optional, Union
+import h5py
+
+# Try to import sdf_helper (compiled EPOCH utility)
+try:
+    import sdf_helper as sh
+    HAS_SDF_HELPER = True
+except ImportError:
+    HAS_SDF_HELPER = False
+    sh = None
 
 
-class BaseLoader(ABC):
-    """Base class for data loaders"""
+def reconstruct_field_from_modes(mode_real: np.ndarray, mode_imag: np.ndarray,
+                                  theta: float = 0) -> np.ndarray:
+    """
+    Reconstruct field from quasi-3D modal data at given azimuthal angle.
 
-    def __init__(self, filepath: Union[str, Path]):
+    For quasi-3D simulations, fields are stored as modal coefficients:
+        F(x,r,theta) = F_0(x,r) + F_1(x,r)*cos(theta) + F_1i(x,r)*sin(theta)
+
+    Args:
+        mode_real: Array with shape (nx, nr, n_modes) - real parts
+        mode_imag: Array with shape (nx, nr, n_modes) - imaginary parts
+        theta: Azimuthal angle in radians (0 for y-direction, pi/2 for z)
+
+    Returns:
+        Reconstructed 2D field at the specified theta
+    """
+    # Handle case with only 1 mode (axisymmetric)
+    if mode_real.shape[-1] == 1:
+        return mode_real[:, :, 0]
+
+    # Mode 0 (axisymmetric) + Mode 1 (asymmetric)
+    field = (mode_real[:, :, 0] +
+             mode_real[:, :, 1] * np.cos(theta) +
+             mode_imag[:, :, 1] * np.sin(theta))
+    return field
+
+
+class EPOCHLoader:
+    """
+    Loader for EPOCH quasi-3D SDF files.
+
+    Usage:
+        loader = EPOCHLoader('E_field0060.sdf')
+        data = loader.load_frame()
+    """
+
+    def __init__(self, filepath: Union[str, Path], use_sdf_helper: bool = True):
+        """
+        Initialize EPOCH loader.
+
+        Args:
+            filepath: Path to SDF file
+            use_sdf_helper: Try to use sdf_helper module (True), or HDF5 fallback (False)
+        """
         self.filepath = Path(filepath)
         if not self.filepath.exists():
             raise FileNotFoundError(f"File not found: {self.filepath}")
 
-    @abstractmethod
-    def load_field(self, field_name: str) -> Dict[str, np.ndarray]:
-        """Load a field from the file"""
-        pass
+        self.use_sdf_helper = use_sdf_helper and HAS_SDF_HELPER
+        self.data = None
 
-    @abstractmethod
-    def load_particles(self, species: str) -> Dict[str, np.ndarray]:
-        """Load particle data for a given species"""
-        pass
+        if self.use_sdf_helper:
+            if not HAS_SDF_HELPER:
+                raise ImportError(
+                    "sdf_helper module not found. "
+                    "Compile with: cd /path/to/epoch/epoch2d && make sdfutils"
+                )
+            # Load SDF file
+            self.data = sh.getdata(str(self.filepath))
+        else:
+            # Use HDF5 fallback for synthetic data
+            self.file = h5py.File(str(self.filepath), 'r')
 
-    @abstractmethod
-    def list_fields(self) -> List[str]:
-        """List available fields in the file"""
-        pass
-
-    @abstractmethod
-    def list_species(self) -> List[str]:
-        """List available particle species"""
-        pass
-
-    @abstractmethod
-    def get_metadata(self) -> Dict:
-        """Get simulation metadata (time, grid info, etc.)"""
-        pass
-
-
-class SDFLoader(BaseLoader):
-    """Loader for EPOCH SDF files"""
-
-    def __init__(self, filepath: Union[str, Path]):
-        super().__init__(filepath)
-        try:
-            import sdf
-            self._sdf = sdf
-            self.data = sdf.read(str(self.filepath))
-        except ImportError:
-            raise ImportError(
-                "SDF module not found. Install with: pip install sdf"
-            )
-
-    def load_field(self, field_name: str) -> Dict[str, np.ndarray]:
+    def load_electric_fields(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
         """
-        Load a field from SDF file.
+        Load electric field data from quasi-3D SDF file.
 
         Args:
-            field_name: Name of the field (e.g., 'Electric Field/Ex', 'Derived/Number_Density/electron')
+            params: Optional dict with E_norm_laser and E_norm_plasma for normalization
 
         Returns:
-            Dictionary containing 'data', 'grid_x', 'grid_y', 'grid_z' (if applicable)
+            Dict with:
+                - E_x: Longitudinal field (nx, nr)
+                - E_y: Transverse field at theta=0 (nx, nr)
+                - E_z: Transverse field at theta=pi/2 (nx, nr)
+                - E_tot: Total transverse field magnitude (nx, nr)
+                - E_x_norm, E_tot_norm: Normalized fields (if params provided)
         """
-        if not hasattr(self.data, field_name.replace('/', '_')):
-            raise ValueError(f"Field '{field_name}' not found in SDF file")
+        if self.use_sdf_helper:
+            return self._load_fields_sdf(params)
+        else:
+            return self._load_fields_h5(params)
 
-        # SDF stores fields with underscores instead of slashes in attribute names
-        field_attr = field_name.replace('/', '_')
-        field_data = getattr(self.data, field_attr)
+    def _load_fields_sdf(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load fields from EPOCH SDF file using sdf_helper."""
+        # Get modal field data
+        Erm_real = self.data.Electric_Field_Modes_Erm_real.data
+        Erm_imag = self.data.Electric_Field_Modes_Erm_imag.data
+        Exm_real = self.data.Electric_Field_Modes_Exm_real.data
+        Exm_imag = self.data.Electric_Field_Modes_Exm_imag.data
 
-        result = {'data': field_data.data}
+        # Reconstruct fields at different azimuthal angles
+        E_y = reconstruct_field_from_modes(Erm_real, Erm_imag, theta=0)
+        E_z = reconstruct_field_from_modes(Erm_real, Erm_imag, theta=np.pi/2)
+        E_x = reconstruct_field_from_modes(Exm_real, Exm_imag, theta=0)
 
-        # Get grid information
-        if hasattr(field_data, 'grid'):
-            grid = field_data.grid
-            if hasattr(grid, 'data'):
-                # For structured grids
-                grid_data = grid.data
-                if len(grid_data) >= 1:
-                    result['grid_x'] = grid_data[0]
-                if len(grid_data) >= 2:
-                    result['grid_y'] = grid_data[1]
-                if len(grid_data) >= 3:
-                    result['grid_z'] = grid_data[2]
+        # Total transverse field
+        E_tot = np.sqrt(E_y**2 + E_z**2)
+
+        result = {
+            'E_x': E_x,
+            'E_y': E_y,
+            'E_z': E_z,
+            'E_tot': E_tot,
+        }
+
+        # Apply normalization if parameters provided
+        if params is not None:
+            if 'E_norm_plasma' in params:
+                result['E_x_norm'] = E_x / params['E_norm_plasma']
+            if 'E_norm_laser' in params:
+                result['E_tot_norm'] = E_tot / params['E_norm_laser']
+                result['E_y_norm'] = E_y / params['E_norm_laser']
+                result['E_z_norm'] = E_z / params['E_norm_laser']
 
         return result
 
-    def load_particles(self, species: str) -> Dict[str, np.ndarray]:
+    def _load_fields_h5(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load fields from HDF5 file (synthetic data)."""
+        efield_group = self.file['Electric_Field_Modes']
+
+        Erm_real = efield_group['Erm_real'][:]
+        Erm_imag = efield_group['Erm_imag'][:]
+        Exm_real = efield_group['Exm_real'][:]
+        Exm_imag = efield_group['Exm_imag'][:]
+
+        # Reconstruct fields
+        E_y = reconstruct_field_from_modes(Erm_real, Erm_imag, theta=0)
+        E_z = reconstruct_field_from_modes(Erm_real, Erm_imag, theta=np.pi/2)
+        E_x = reconstruct_field_from_modes(Exm_real, Exm_imag, theta=0)
+
+        E_tot = np.sqrt(E_y**2 + E_z**2)
+
+        result = {
+            'E_x': E_x,
+            'E_y': E_y,
+            'E_z': E_z,
+            'E_tot': E_tot,
+        }
+
+        # Apply normalization
+        if params is not None:
+            if 'E_norm_plasma' in params:
+                result['E_x_norm'] = E_x / params['E_norm_plasma']
+            if 'E_norm_laser' in params:
+                result['E_tot_norm'] = E_tot / params['E_norm_laser']
+                result['E_y_norm'] = E_y / params['E_norm_laser']
+                result['E_z_norm'] = E_z / params['E_norm_laser']
+
+        return result
+
+    def load_density(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """
+        Load electron density data.
+
+        Args:
+            params: Optional dict with n_c for normalization
+
+        Returns:
+            Dict with:
+                - n_e: Electron density (nx, nr) in m^-3
+                - n_e_norm: Normalized to critical density (if params provided)
+        """
+        if self.use_sdf_helper:
+            return self._load_density_sdf(params)
+        else:
+            return self._load_density_h5(params)
+
+    def _load_density_sdf(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load density from EPOCH SDF file."""
+        n_e = self.data.Derived_Number_Density_Subset_total_e.data
+
+        result = {'n_e': n_e}
+
+        if params is not None and 'n_c' in params:
+            result['n_e_norm'] = n_e / params['n_c']
+
+        return result
+
+    def _load_density_h5(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load density from HDF5 file."""
+        n_e = self.file['Derived_Number_Density/Subset_total_e'][:]
+
+        result = {'n_e': n_e}
+
+        if params is not None and 'n_c' in params:
+            result['n_e_norm'] = n_e / params['n_c']
+
+        return result
+
+    def load_grid(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """
+        Load grid coordinates.
+
+        Args:
+            params: Optional dict with lambda0 for normalization
+
+        Returns:
+            Dict with:
+                - x: X-coordinates in meters (1D array)
+                - r: R-coordinates in meters (1D array)
+                - x_norm, r_norm: Normalized to lambda0 (if params provided)
+        """
+        if self.use_sdf_helper:
+            return self._load_grid_sdf(params)
+        else:
+            return self._load_grid_h5(params)
+
+    def _load_grid_sdf(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load grid from EPOCH SDF file."""
+        grid_data = self.data.Grid_Grid_mid.data
+        x = grid_data[0]
+        r = grid_data[1]
+
+        result = {'x': x, 'r': r}
+
+        if params is not None and 'lambda0' in params:
+            result['x_norm'] = x / params['lambda0']
+            result['r_norm'] = r / params['lambda0']
+
+        return result
+
+    def _load_grid_h5(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load grid from HDF5 file."""
+        x = self.file['Grid/Grid_mid/x'][:]
+        r = self.file['Grid/Grid_mid/r'][:]
+
+        result = {'x': x, 'r': r}
+
+        if params is not None and 'lambda0' in params:
+            result['x_norm'] = x / params['lambda0']
+            result['r_norm'] = r / params['lambda0']
+
+        return result
+
+    def load_particles(self, species: str = 'He_electron',
+                       params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
         """
         Load particle data for a given species.
 
         Args:
-            species: Name of species (e.g., 'electron', 'proton')
+            species: Species name (e.g., 'He_electron', 'H_ion')
+            params: Optional dict with lambda0 and M_E, C_LIGHT for normalization
 
         Returns:
-            Dictionary with particle arrays: 'x', 'y', 'z', 'px', 'py', 'pz', 'weight'
+            Dict with:
+                - x, r: Position arrays in meters
+                - px, pr: Momentum arrays in kg*m/s
+                - weight: Particle weights in Coulombs
+                - x_norm, r_norm: Normalized positions (if params provided)
+                - px_norm, pr_norm: Normalized momentum (if params provided)
         """
-        result = {}
+        if self.use_sdf_helper:
+            return self._load_particles_sdf(species, params)
+        else:
+            return self._load_particles_h5(species, params)
 
-        # Try to load particle data
-        for coord in ['x', 'y', 'z']:
-            attr_name = f"Particles_{species}_{coord.upper()}"
-            if hasattr(self.data, attr_name):
-                result[coord] = getattr(self.data, attr_name).data
+    def _load_particles_sdf(self, species: str, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load particles from EPOCH SDF file."""
+        # Get particle positions from grid
+        grid_attr = f"Grid_Particles_{species}"
+        if not hasattr(self.data, grid_attr):
+            return {'x': np.array([]), 'r': np.array([]), 'px': np.array([]),
+                    'pr': np.array([]), 'weight': np.array([])}
 
-        for momentum in ['px', 'py', 'pz']:
-            attr_name = f"Particles_{species}_P{momentum[1].upper()}"
-            if hasattr(self.data, attr_name):
-                result[momentum] = getattr(self.data, attr_name).data
+        grid_data = getattr(self.data, grid_attr).data
+        x = np.squeeze(grid_data[0])
+        r = np.squeeze(grid_data[1])
 
-        # Weight
-        weight_attr = f"Particles_{species}_Weight"
-        if hasattr(self.data, weight_attr):
-            result['weight'] = getattr(self.data, weight_attr).data
+        # Get momentum
+        px = np.squeeze(getattr(self.data, f"Particles_Px_{species}").data)
+        pr = np.squeeze(getattr(self.data, f"Particles_Pr_{species}").data)
+
+        # Get weight
+        weight = np.squeeze(getattr(self.data, f"Particles_Weight_{species}").data)
+
+        # Flatten arrays
+        result = {
+            'x': x.flatten() if x.size else np.array([]),
+            'r': r.flatten() if r.size else np.array([]),
+            'px': px.flatten() if px.size else np.array([]),
+            'pr': pr.flatten() if pr.size else np.array([]),
+            'weight': weight.flatten() if weight.size else np.array([]),
+        }
+
+        # Apply normalization
+        if params is not None:
+            if 'lambda0' in params:
+                result['x_norm'] = result['x'] / params['lambda0']
+                result['r_norm'] = result['r'] / params['lambda0']
+            if 'M_E' in params and 'C_LIGHT' in params:
+                from ..utils.physics import M_E, C_LIGHT
+                result['px_norm'] = result['px'] / (M_E * C_LIGHT)
+                result['pr_norm'] = result['pr'] / (M_E * C_LIGHT)
 
         return result
 
-    def list_fields(self) -> List[str]:
-        """List available fields"""
-        fields = []
-        for key in dir(self.data):
-            if not key.startswith('_'):
-                attr = getattr(self.data, key)
-                if hasattr(attr, 'data') and hasattr(attr, 'grid'):
-                    fields.append(key.replace('_', '/'))
-        return fields
+    def _load_particles_h5(self, species: str, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
+        """Load particles from HDF5 file."""
+        particles_group = f'Particles_{species}'
+        if particles_group not in self.file:
+            return {'x': np.array([]), 'r': np.array([]), 'px': np.array([]),
+                    'pr': np.array([]), 'weight': np.array([])}
 
-    def list_species(self) -> List[str]:
-        """List available particle species"""
-        species = set()
-        for key in dir(self.data):
-            if key.startswith('Particles_'):
-                parts = key.split('_')
-                if len(parts) >= 2:
-                    species.add(parts[1])
-        return list(species)
+        x = self.file[f'Grid/{particles_group}/x'][:]
+        r = self.file[f'Grid/{particles_group}/r'][:]
 
-    def get_metadata(self) -> Dict:
-        """Get simulation metadata"""
-        metadata = {}
-        if hasattr(self.data, 'Header'):
-            header = self.data.Header
-            metadata['time'] = getattr(header, 'time', None)
-            metadata['step'] = getattr(header, 'step', None)
-        return metadata
+        px = self.file[f'{particles_group}/Px'][:]
+        pr = self.file[f'{particles_group}/Pr'][:]
+        weight = self.file[f'{particles_group}/Weight'][:]
 
+        result = {
+            'x': x.flatten(),
+            'r': r.flatten(),
+            'px': px.flatten(),
+            'pr': pr.flatten(),
+            'weight': weight.flatten(),
+        }
 
-class HDF5Loader(BaseLoader):
-    """Loader for Smilei HDF5 files"""
+        # Apply normalization
+        if params is not None:
+            if 'lambda0' in params:
+                result['x_norm'] = result['x'] / params['lambda0']
+                result['r_norm'] = result['r'] / params['lambda0']
+            if 'M_E' in params and 'C_LIGHT' in params:
+                from ..utils.physics import M_E, C_LIGHT
+                result['px_norm'] = result['px'] / (M_E * C_LIGHT)
+                result['pr_norm'] = result['pr'] / (M_E * C_LIGHT)
 
-    def __init__(self, filepath: Union[str, Path]):
-        super().__init__(filepath)
-        try:
-            import h5py
-            self._h5py = h5py
-            self.file = h5py.File(str(self.filepath), 'r')
-        except ImportError:
-            raise ImportError(
-                "h5py module not found. Install with: pip install h5py"
-            )
+        return result
 
-    def __del__(self):
-        """Close HDF5 file on deletion"""
-        if hasattr(self, 'file'):
+    def load_frame(self, params: Optional[Dict] = None,
+                   downsample_x: int = 1, downsample_r: int = 1,
+                   species: str = 'He_electron') -> Dict:
+        """
+        Load all data for a single frame (convenience method).
+
+        Args:
+            params: Physical parameters dict from compute_derived_quantities()
+            downsample_x: Downsampling factor for x-direction
+            downsample_r: Downsampling factor for r-direction
+            species: Particle species to load
+
+        Returns:
+            Dict with all loaded and normalized data
+        """
+        grid = self.load_grid(params)
+        fields = self.load_electric_fields(params)
+        density = self.load_density(params)
+        particles = self.load_particles(species, params)
+
+        # Apply downsampling to field data
+        ds_x = downsample_x
+        ds_r = downsample_r
+
+        result = {
+            'x': grid.get('x_norm', grid['x'])[::ds_x],
+            'r': grid.get('r_norm', grid['r'])[::ds_r],
+        }
+
+        # Add downsampled fields (transposed for correct shape)
+        if 'E_x_norm' in fields:
+            result['E_x'] = fields['E_x_norm'][::ds_x, ::ds_r].T
+            result['E_tot'] = fields['E_tot_norm'][::ds_x, ::ds_r].T
+        else:
+            result['E_x'] = fields['E_x'][::ds_x, ::ds_r].T
+            result['E_tot'] = fields['E_tot'][::ds_x, ::ds_r].T
+
+        # Add density
+        if 'n_e_norm' in density:
+            result['n_e'] = density['n_e_norm'][::ds_x, ::ds_r].T
+        else:
+            result['n_e'] = density['n_e'][::ds_x, ::ds_r].T
+
+        # Add particles (use normalized if available)
+        result['x_particles'] = particles.get('x_norm', particles['x'])
+        result['r_particles'] = particles.get('r_norm', particles['r'])
+        result['px_particles'] = particles.get('px_norm', particles['px'])
+        result['pr_particles'] = particles.get('pr_norm', particles['pr'])
+        result['weight'] = particles['weight']
+
+        return result
+
+    def close(self):
+        """Close file if using HDF5."""
+        if not self.use_sdf_helper and hasattr(self, 'file'):
             self.file.close()
 
-    def load_field(self, field_name: str) -> Dict[str, np.ndarray]:
-        """
-        Load a field from HDF5 file.
+    def __enter__(self):
+        return self
 
-        Args:
-            field_name: Name of the field (e.g., 'Ex', 'Ey', 'Rho_electron')
-
-        Returns:
-            Dictionary containing 'data', 'grid_x', 'grid_y', 'grid_z' (if applicable)
-        """
-        # Smilei typically stores fields under '/Fields/' or '/Rho/'
-        possible_paths = [
-            f'/Fields/{field_name}',
-            f'/Rho/{field_name}',
-            f'/{field_name}',
-        ]
-
-        field_data = None
-        for path in possible_paths:
-            if path in self.file:
-                field_data = self.file[path][:]
-                break
-
-        if field_data is None:
-            raise ValueError(f"Field '{field_name}' not found in HDF5 file")
-
-        result = {'data': field_data}
-
-        # Try to load grid information
-        if '/x' in self.file:
-            result['grid_x'] = self.file['/x'][:]
-        if '/y' in self.file:
-            result['grid_y'] = self.file['/y'][:]
-        if '/z' in self.file:
-            result['grid_z'] = self.file['/z'][:]
-
-        return result
-
-    def load_particles(self, species: str) -> Dict[str, np.ndarray]:
-        """
-        Load particle data for a given species.
-
-        Args:
-            species: Name of species (e.g., 'electron', 'ion')
-
-        Returns:
-            Dictionary with particle arrays: 'x', 'y', 'z', 'px', 'py', 'pz', 'weight'
-        """
-        result = {}
-
-        # Smilei stores particles under /Species/{species}/
-        species_path = f'/Species/{species}'
-
-        if species_path not in self.file:
-            raise ValueError(f"Species '{species}' not found in HDF5 file")
-
-        species_group = self.file[species_path]
-
-        # Load position and momentum data
-        for key in ['x', 'y', 'z', 'px', 'py', 'pz', 'weight']:
-            if key in species_group:
-                result[key] = species_group[key][:]
-
-        return result
-
-    def list_fields(self) -> List[str]:
-        """List available fields"""
-        fields = []
-
-        # Check common field locations
-        for group_name in ['/Fields', '/Rho']:
-            if group_name in self.file:
-                group = self.file[group_name]
-                fields.extend([name for name in group.keys()])
-
-        return fields
-
-    def list_species(self) -> List[str]:
-        """List available particle species"""
-        if '/Species' in self.file:
-            return list(self.file['/Species'].keys())
-        return []
-
-    def get_metadata(self) -> Dict:
-        """Get simulation metadata"""
-        metadata = {}
-
-        # Try to read common metadata
-        if '/time' in self.file:
-            metadata['time'] = self.file['/time'][()]
-        if '/iteration' in self.file:
-            metadata['step'] = self.file['/iteration'][()]
-
-        # Read attributes
-        for key in self.file.attrs.keys():
-            metadata[key] = self.file.attrs[key]
-
-        return metadata
-
-
-def load_data(filepath: Union[str, Path], format: Optional[str] = None) -> BaseLoader:
-    """
-    Automatically load data based on file format.
-
-    Args:
-        filepath: Path to the data file
-        format: Optional format specification ('sdf' or 'hdf5'). If None, auto-detect.
-
-    Returns:
-        Appropriate loader instance
-
-    Examples:
-        >>> loader = load_data('output.sdf')
-        >>> field = loader.load_field('Electric_Field_Ex')
-        >>> particles = loader.load_particles('electron')
-    """
-    filepath = Path(filepath)
-
-    if format is None:
-        # Auto-detect based on file extension
-        ext = filepath.suffix.lower()
-        if ext == '.sdf':
-            format = 'sdf'
-        elif ext in ['.h5', '.hdf5']:
-            format = 'hdf5'
-        else:
-            # Try to detect by attempting to open
-            try:
-                import h5py
-                with h5py.File(str(filepath), 'r'):
-                    format = 'hdf5'
-            except:
-                try:
-                    import sdf
-                    sdf.read(str(filepath))
-                    format = 'sdf'
-                except:
-                    raise ValueError(
-                        f"Could not determine format for {filepath}. "
-                        "Please specify format='sdf' or format='hdf5'"
-                    )
-
-    if format.lower() == 'sdf':
-        return SDFLoader(filepath)
-    elif format.lower() in ['hdf5', 'h5']:
-        return HDF5Loader(filepath)
-    else:
-        raise ValueError(f"Unknown format: {format}. Use 'sdf' or 'hdf5'")
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()

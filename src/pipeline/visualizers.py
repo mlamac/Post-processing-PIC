@@ -1,23 +1,44 @@
 """
-Visualization module for PIC simulation data.
-Creates interactive HTML plots and publication-quality PNG figures.
+Visualization module for EPOCH quasi-3D LWFA simulations.
+Creates 3-panel animated visualizations matching the working script style.
 """
 
-import numpy as np
+import matplotlib as mpl
+# Use Agg backend for HPC compatibility (must be before pyplot import)
+mpl.use('Agg')
+
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from matplotlib.colors import LinearSegmentedColormap
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import matplotlib.colors as colors
+from matplotlib.animation import FuncAnimation
+from matplotlib.lines import Line2D
+import numpy as np
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
-from .processors import DataProcessor
+from typing import Dict, List, Optional, Tuple
+
+# Configure matplotlib for publication-quality figures
+mpl.rcParams['axes.linewidth'] = 1
+mpl.rcParams["mathtext.fontset"] = 'stix'
+mpl.rcParams['font.family'] = 'STIXGeneral'
+mpl.rcParams['animation.embed_limit'] = 2**31 - 1  # Large animation limit
+
+SMALL_SIZE = 10
+MEDIUM_SIZE = 12
+BIGGER_SIZE = 14
+plt.rc('font', size=MEDIUM_SIZE)
+plt.rc('axes', titlesize=MEDIUM_SIZE, labelsize=MEDIUM_SIZE)
+plt.rc('xtick', labelsize=SMALL_SIZE)
+plt.rc('ytick', labelsize=SMALL_SIZE)
+plt.rc('legend', fontsize=SMALL_SIZE)
+plt.rc('figure', titlesize=BIGGER_SIZE)
 
 
-class Visualizer:
-    """Create visualizations for PIC simulation data"""
+class EPOCHVisualizer:
+    """
+    Create visualizations for EPOCH quasi-3D LWFA data.
+    Matches the style from the working post-process-lwfa.py script.
+    """
 
-    def __init__(self, output_dir: Union[str, Path] = 'output'):
+    def __init__(self, output_dir: str = 'post-process-output'):
         """
         Initialize visualizer.
 
@@ -27,473 +48,269 @@ class Visualizer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create custom colormaps
-        self._setup_colormaps()
+    def create_3panel_animation(
+        self,
+        data: Dict,
+        config: Dict,
+        params: Dict,
+        output_name: str = 'lwfa_q3d_animation'
+    ) -> Tuple[plt.Figure, FuncAnimation]:
+        """
+        Create 3-panel animation figure matching the working script style.
 
-    def _setup_colormaps(self):
-        """Setup custom colormaps for visualization"""
+        Panel 1: 2D density + field overlay (pcolormesh)
+        Panel 2: Longitudinal phase space (scatter)
+        Panel 3: Momentum distribution (line plot)
 
-        # Transparent seismic colormap (divergent, transparent near zero)
-        # Blue (negative) -> Transparent (zero) -> Red (positive)
-        colors_seismic = [
-            (0.0, (0.0, 0.0, 0.6, 1.0)),   # Dark blue, opaque
-            (0.25, (0.3, 0.3, 1.0, 0.7)),  # Blue, semi-transparent
-            (0.45, (0.7, 0.7, 1.0, 0.2)),  # Light blue, very transparent
-            (0.5, (1.0, 1.0, 1.0, 0.0)),   # White, fully transparent
-            (0.55, (1.0, 0.7, 0.7, 0.2)),  # Light red, very transparent
-            (0.75, (1.0, 0.3, 0.3, 0.7)),  # Red, semi-transparent
-            (1.0, (0.6, 0.0, 0.0, 1.0))    # Dark red, opaque
-        ]
+        Args:
+            data: Dict containing:
+                - E_x: List of E_x arrays (one per frame)
+                - E_tot: List of E_tot arrays
+                - n_e: List of density arrays
+                - x, r: List of grid arrays
+                - particles: List of particle dicts with 'x_he', 'px_he'
+                - px_dist: List of momentum histograms
+                - px_centers: Momentum bin centers
+            config: Configuration dict with visualization parameters
+            params: Physical parameters dict (for dumpstep)
+            output_name: Base name for output file
 
-        cmap_data = [(pos, color) for pos, color in colors_seismic]
-        positions = [pos for pos, _ in cmap_data]
-        colors = [color for _, color in cmap_data]
+        Returns:
+            (fig, anim) tuple
+        """
+        n_frames = len(data['x'])
+        dumpstep = params.get('dumpstep', 1.0)
+        a0 = config.get('a0', 3.0)
 
-        self.cmap_seismic_transparent = LinearSegmentedColormap.from_list(
-            'seismic_transparent',
-            list(zip(positions, colors))
+        # Get visualization parameters
+        density_vmin = config.get('density_vmin', 1e-4)
+        density_vmax = config.get('density_vmax', 1.0)
+        field_vmax = config.get('field_vmax', 5.0)
+        r_max = config.get('r_max_lambda0', 130)
+        px_ylim = config.get('px_ylim', (1, 10000))
+
+        # Create figure with 3 subplots
+        fig, (ax1, ax2, ax3) = plt.subplots(
+            3, 1, figsize=(3.54, 2*3.54), dpi=200,
+            gridspec_kw={'height_ratios': [1.75, 1, 1]}
         )
 
-        # Standard grayscale for density
-        self.cmap_density = plt.cm.gray
+        # Initial data
+        x0, r0 = data['x'][0], data['r'][0]
 
-    def plot_density_with_field_overlay(
-        self,
-        x: np.ndarray,
-        y: np.ndarray,
-        density: np.ndarray,
-        field: np.ndarray,
-        output_name: str = 'density_field',
-        title: str = 'Electron Density with Transverse E-Field',
-        density_label: str = 'Electron Density',
-        field_label: str = 'Transverse E-Field',
-        save_png: bool = True,
-        save_html: bool = True,
-        figsize: Tuple[int, int] = (12, 6),
-        dpi: int = 150,
-        field_symmetric: bool = True,
-        smooth_density: float = 0.0,
-        smooth_field: float = 0.0
-    ) -> None:
-        """
-        Create density plot with field overlay.
+        # =====================================================================
+        # Panel 1: 2D density and field
+        # =====================================================================
 
-        Args:
-            x: X-axis coordinates (m)
-            y: Y-axis coordinates (m)
-            density: 2D electron density array
-            field: 2D field array (e.g., E_y)
-            output_name: Base name for output files
-            title: Plot title
-            density_label: Label for density colorbar
-            field_label: Label for field colorbar
-            save_png: Save static PNG
-            save_html: Save interactive HTML
-            figsize: Figure size for PNG
-            dpi: DPI for PNG
-            field_symmetric: Use symmetric colormap for field
-            smooth_density: Gaussian smoothing sigma for density
-            smooth_field: Gaussian smoothing sigma for field
-        """
-
-        # Apply smoothing if requested
-        if smooth_density > 0:
-            density = DataProcessor.smooth_field(density, smooth_density)
-        if smooth_field > 0:
-            field = DataProcessor.smooth_field(field, smooth_field)
-
-        # Convert to microns for display
-        x_um = x * 1e6
-        y_um = y * 1e6
-
-        # Static PNG plot with matplotlib
-        if save_png:
-            fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
-
-            # Plot density in grayscale
-            im1 = ax.imshow(
-                density.T,
-                extent=[x_um[0], x_um[-1], y_um[0], y_um[-1]],
-                aspect='auto',
-                cmap=self.cmap_density,
-                origin='lower',
-                interpolation='bilinear'
-            )
-
-            # Overlay field with transparent divergent colormap
-            if field_symmetric:
-                vmax_field = np.max(np.abs(field))
-                vmin_field = -vmax_field
-            else:
-                vmin_field = np.min(field)
-                vmax_field = np.max(field)
-
-            im2 = ax.imshow(
-                field.T,
-                extent=[x_um[0], x_um[-1], y_um[0], y_um[-1]],
-                aspect='auto',
-                cmap=self.cmap_seismic_transparent,
-                origin='lower',
-                vmin=vmin_field,
-                vmax=vmax_field,
-                interpolation='bilinear'
-            )
-
-            # Colorbars
-            cbar1 = plt.colorbar(im1, ax=ax, pad=0.02, fraction=0.046)
-            cbar1.set_label(density_label, rotation=270, labelpad=20)
-
-            cbar2 = plt.colorbar(im2, ax=ax, pad=0.12, fraction=0.046)
-            cbar2.set_label(field_label, rotation=270, labelpad=20)
-
-            ax.set_xlabel('x [μm]')
-            ax.set_ylabel('y [μm]')
-            ax.set_title(title)
-
-            plt.tight_layout()
-            png_path = self.output_dir / f'{output_name}.png'
-            plt.savefig(png_path, dpi=dpi, bbox_inches='tight')
-            plt.close()
-            print(f"Saved PNG: {png_path}")
-
-        # Interactive HTML plot with plotly
-        if save_html:
-            # Create subplots with shared axes
-            fig = make_subplots(
-                rows=1, cols=2,
-                subplot_titles=(density_label, field_label),
-                horizontal_spacing=0.12
-            )
-
-            # Density plot
-            fig.add_trace(
-                go.Heatmap(
-                    x=x_um,
-                    y=y_um,
-                    z=density.T,
-                    colorscale='Greys',
-                    colorbar=dict(x=0.42, len=0.9),
-                    name=density_label
-                ),
-                row=1, col=1
-            )
-
-            # Field plot
-            if field_symmetric:
-                vmax_field = np.max(np.abs(field))
-                zmin, zmax = -vmax_field, vmax_field
-            else:
-                zmin, zmax = np.min(field), np.max(field)
-
-            fig.add_trace(
-                go.Heatmap(
-                    x=x_um,
-                    y=y_um,
-                    z=field.T,
-                    colorscale='RdBu_r',
-                    zmid=0,
-                    zmin=zmin,
-                    zmax=zmax,
-                    colorbar=dict(x=1.02, len=0.9),
-                    name=field_label
-                ),
-                row=1, col=2
-            )
-
-            # Update layout
-            fig.update_xaxes(title_text='x [μm]', row=1, col=1)
-            fig.update_xaxes(title_text='x [μm]', row=1, col=2)
-            fig.update_yaxes(title_text='y [μm]', row=1, col=1)
-            fig.update_yaxes(title_text='y [μm]', row=1, col=2)
-
-            fig.update_layout(
-                title_text=title,
-                height=500,
-                width=1200,
-                showlegend=False
-            )
-
-            html_path = self.output_dir / f'{output_name}.html'
-            fig.write_html(str(html_path))
-            print(f"Saved HTML: {html_path}")
-
-    def plot_phase_space(
-        self,
-        x: np.ndarray,
-        px: np.ndarray,
-        weight: Optional[np.ndarray] = None,
-        output_name: str = 'phase_space_x_px',
-        title: str = 'Phase Space: x-px',
-        xlabel: str = 'x [μm]',
-        ylabel: str = 'px [m_e c]',
-        save_png: bool = True,
-        save_html: bool = True,
-        figsize: Tuple[int, int] = (10, 6),
-        dpi: int = 150,
-        bins: Tuple[int, int] = (100, 100),
-        log_scale: bool = True
-    ) -> None:
-        """
-        Create phase space plot.
-
-        Args:
-            x: Position array (m)
-            px: Momentum array (m_e c units)
-            weight: Particle weights
-            output_name: Base name for output files
-            title: Plot title
-            xlabel: X-axis label
-            ylabel: Y-axis label
-            save_png: Save static PNG
-            save_html: Save interactive HTML
-            figsize: Figure size for PNG
-            dpi: DPI for PNG
-            bins: Number of bins (nx, ny)
-            log_scale: Use log scale for colormap
-        """
-
-        # Convert x to microns
-        x_um = x * 1e6
-
-        if weight is None:
-            weight = np.ones_like(x)
-
-        # Create 2D histogram
-        H, xedges, yedges = np.histogram2d(
-            x_um, px, bins=bins, weights=weight
+        plot_dens = ax1.pcolormesh(
+            x0, r0, data['n_e'][0],
+            cmap='Greys',
+            norm=colors.LogNorm(vmin=density_vmin, vmax=density_vmax),
+            shading='auto'
+        )
+        plot_field = ax1.pcolormesh(
+            x0, r0, data['E_tot'][0],
+            cmap='PuRd', vmin=0, vmax=field_vmax,
+            alpha=0.2, shading='auto'
+        )
+        ax1.set_ylabel(r"$r\: /\: \lambda_{0}$")
+        ax1.set_xlabel(r"$x\: /\: \lambda_{0}$")
+        ax1.set_ylim(r0[0], r_max)
+        ax1.set_title(
+            f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {0:.0f}$",
+            loc='left', fontsize=12
         )
 
-        if log_scale:
-            H = np.log10(H + 1)  # +1 to avoid log(0)
+        # =====================================================================
+        # Panel 2: Phase space scatter
+        # =====================================================================
 
-        # Static PNG plot
-        if save_png:
-            fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
+        pdata = data['particles'][0]
+        scatter_he = ax2.scatter(
+            pdata['x_he'], pdata['px_he'],
+            s=2, c='r', alpha=0.5, marker='.', linewidths=0
+        )
+        ax2.set_ylabel(r"$p_x\: /\: m_{e}c$")
+        ax2.set_xlabel(r"$x\: /\: \lambda_{0}$")
+        ax2.set_ylim(px_ylim)
+        ax2.set_xlim(x0[0], x0[-1])
 
-            im = ax.imshow(
-                H.T,
-                extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
-                aspect='auto',
-                origin='lower',
-                cmap='viridis',
-                interpolation='bilinear'
+        legend_handles = [Line2D([0], [0], color='red', lw=1, label='Plasma e-')]
+        ax2.legend(handles=legend_handles, frameon=True, framealpha=0, loc="upper left")
+
+        # =====================================================================
+        # Panel 3: Momentum distribution
+        # =====================================================================
+
+        px_centers = data['px_centers']
+        line_dist, = ax3.plot(px_centers, data['px_dist'][0], color='red', label='Plasma e-')
+        ax3.set_xlabel(r"$p_x\: /\: m_e c$")
+        ax3.set_ylabel(r"$dN\:/\:dp_x$")
+        ax3.set_xlim(px_centers[0], px_centers[-1])
+
+        # Auto-scale y-axis based on max histogram value
+        # Auto-scale y-axis based on max histogram value
+        valid_hists = [np.max(h) for h in data['px_dist'] if len(h) > 0 and np.max(h) > 0]
+        max_hist = max(valid_hists) if valid_hists else 1.0
+        ax3.set_ylim(0, max_hist * 0.5)
+
+        ax3.legend(frameon=True, framealpha=0, loc="upper right")
+
+        fig.tight_layout()
+
+        # Store plot objects that need to be recreated each frame
+        plot_objects = {'dens': plot_dens, 'field': plot_field}
+
+        # =====================================================================
+        # Animation update function
+        # =====================================================================
+
+        def animate(frame):
+            x = data['x'][frame]
+            r = data['r'][frame]
+
+            # Update Panel 1: density and field
+            # Remove old pcolormesh and create new ones (needed for moving window)
+            plot_objects['dens'].remove()
+            plot_objects['field'].remove()
+
+            plot_objects['dens'] = ax1.pcolormesh(
+                x, r, data['n_e'][frame],
+                cmap='Greys',
+                norm=colors.LogNorm(vmin=density_vmin, vmax=density_vmax),
+                shading='auto'
+            )
+            plot_objects['field'] = ax1.pcolormesh(
+                x, r, data['E_tot'][frame],
+                cmap='PuRd', vmin=0, vmax=field_vmax,
+                alpha=0.2, shading='auto'
             )
 
-            cbar = plt.colorbar(im, ax=ax)
-            cbar_label = 'log10(Charge) [a.u.]' if log_scale else 'Charge [a.u.]'
-            cbar.set_label(cbar_label, rotation=270, labelpad=20)
-
-            ax.set_xlabel(xlabel)
-            ax.set_ylabel(ylabel)
-            ax.set_title(title)
-
-            plt.tight_layout()
-            png_path = self.output_dir / f'{output_name}.png'
-            plt.savefig(png_path, dpi=dpi, bbox_inches='tight')
-            plt.close()
-            print(f"Saved PNG: {png_path}")
-
-        # Interactive HTML plot
-        if save_html:
-            x_centers = 0.5 * (xedges[1:] + xedges[:-1])
-            y_centers = 0.5 * (yedges[1:] + yedges[:-1])
-
-            fig = go.Figure(data=go.Heatmap(
-                x=x_centers,
-                y=y_centers,
-                z=H.T,
-                colorscale='Viridis',
-                colorbar=dict(
-                    title='log10(Charge)' if log_scale else 'Charge'
-                )
-            ))
-
-            fig.update_layout(
-                title=title,
-                xaxis_title=xlabel,
-                yaxis_title=ylabel,
-                height=600,
-                width=900
+            ax1.set_xlim(x[0], x[-1])
+            ax1.set_title(
+                f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {frame * dumpstep:.0f}$",
+                loc='left', fontsize=12
             )
 
-            html_path = self.output_dir / f'{output_name}.html'
-            fig.write_html(str(html_path))
-            print(f"Saved HTML: {html_path}")
+            # Update Panel 2: phase space
+            pdata = data['particles'][frame]
+            if pdata['x_he'].size and pdata['px_he'].size:
+                he_data = np.column_stack((pdata['x_he'], pdata['px_he']))
+                scatter_he.set_offsets(he_data)
+            else:
+                scatter_he.set_offsets(np.empty((0, 2)))
+            ax2.set_xlim(x[0], x[-1])
 
-    def plot_energy_spectrum(
-        self,
-        energy: np.ndarray,
-        spectrum: np.ndarray,
-        output_name: str = 'energy_spectrum',
-        title: str = 'Electron Energy Spectrum',
-        save_png: bool = True,
-        save_html: bool = True,
-        figsize: Tuple[int, int] = (10, 6),
-        dpi: int = 150,
-        log_scale: bool = False
-    ) -> None:
+            # Update Panel 3: momentum distribution
+            line_dist.set_ydata(data['px_dist'][frame])
+
+            return plot_objects['dens'], plot_objects['field'], scatter_he, line_dist
+
+        # Create animation
+        interval = config.get('animation_interval', 50)
+        anim = FuncAnimation(
+            fig, animate, frames=n_frames,
+            interval=interval, blit=False, repeat=True
+        )
+
+        return fig, anim
+
+    def save_animation_html(self, anim: FuncAnimation, output_name: str):
         """
-        Plot energy spectrum.
+        Save animation as standalone HTML file.
 
         Args:
-            energy: Energy bins (MeV)
-            spectrum: Spectrum values
-            output_name: Base name for output files
-            title: Plot title
-            save_png: Save static PNG
-            save_html: Save interactive HTML
-            figsize: Figure size for PNG
-            dpi: DPI for PNG
-            log_scale: Use log scale for y-axis
+            anim: FuncAnimation object
+            output_name: Base name for output file (without extension)
         """
+        html_output = anim.to_jshtml()
+        html_path = self.output_dir / f"{output_name}.html"
 
-        # Static PNG plot
-        if save_png:
-            fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
+        with open(html_path, 'w') as f:
+            f.write(html_output)
 
-            ax.plot(energy, spectrum, 'b-', linewidth=2)
-            ax.fill_between(energy, spectrum, alpha=0.3)
+        print(f"Saved animation: {html_path}")
 
-            ax.set_xlabel('Energy [MeV]')
-            ax.set_ylabel('dQ/dE [a.u.]')
-            ax.set_title(title)
-            ax.grid(True, alpha=0.3)
-
-            if log_scale:
-                ax.set_yscale('log')
-
-            plt.tight_layout()
-            png_path = self.output_dir / f'{output_name}.png'
-            plt.savefig(png_path, dpi=dpi, bbox_inches='tight')
-            plt.close()
-            print(f"Saved PNG: {png_path}")
-
-        # Interactive HTML plot
-        if save_html:
-            fig = go.Figure()
-
-            fig.add_trace(go.Scatter(
-                x=energy,
-                y=spectrum,
-                mode='lines',
-                fill='tozeroy',
-                line=dict(color='blue', width=2),
-                name='Spectrum'
-            ))
-
-            fig.update_layout(
-                title=title,
-                xaxis_title='Energy [MeV]',
-                yaxis_title='dQ/dE [a.u.]',
-                height=600,
-                width=900,
-                hovermode='x unified'
-            )
-
-            if log_scale:
-                fig.update_yaxes(type='log')
-
-            html_path = self.output_dir / f'{output_name}.html'
-            fig.write_html(str(html_path))
-            print(f"Saved HTML: {html_path}")
-
-    def plot_particle_distribution(
+    def plot_static_frame(
         self,
-        x: np.ndarray,
-        y: np.ndarray,
-        color_by: Optional[np.ndarray] = None,
-        output_name: str = 'particle_distribution',
-        title: str = 'Particle Distribution',
-        color_label: str = 'Energy [MeV]',
-        save_png: bool = True,
-        save_html: bool = True,
-        figsize: Tuple[int, int] = (10, 6),
-        dpi: int = 150,
-        alpha: float = 0.5,
-        marker_size: float = 1.0
-    ) -> None:
+        frame_data: Dict,
+        config: Dict,
+        output_name: str = 'static_frame',
+        frame_index: int = 0,
+        time_omega_pe: float = 0
+    ):
         """
-        Plot particle spatial distribution.
+        Create static 3-panel plot for a single frame.
 
         Args:
-            x: X positions (m)
-            y: Y positions (m)
-            color_by: Optional array to color particles by (e.g., energy)
-            output_name: Base name for output files
-            title: Plot title
-            color_label: Label for color bar
-            save_png: Save static PNG
-            save_html: Save interactive HTML
-            figsize: Figure size for PNG
-            dpi: DPI for PNG
-            alpha: Transparency of markers
-            marker_size: Size of markers
+            frame_data: Dict with single frame data (E_x, E_tot, n_e, x, r, particles, px_dist)
+            config: Configuration dict
+            output_name: Output filename (without extension)
+            frame_index: Frame number for labeling
+            time_omega_pe: Simulation time in omega_pe units
         """
+        a0 = config.get('a0', 3.0)
+        density_vmin = config.get('density_vmin', 1e-4)
+        density_vmax = config.get('density_vmax', 1.0)
+        field_vmax = config.get('field_vmax', 5.0)
+        r_max = config.get('r_max_lambda0', 130)
+        px_ylim = config.get('px_ylim', (1, 10000))
 
-        x_um = x * 1e6
-        y_um = y * 1e6
+        fig, (ax1, ax2, ax3) = plt.subplots(
+            3, 1, figsize=(3.54, 2*3.54), dpi=200,
+            gridspec_kw={'height_ratios': [1.75, 1, 1]}
+        )
 
-        # Static PNG plot
-        if save_png:
-            fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
+        x = frame_data['x']
+        r = frame_data['r']
 
-            if color_by is not None:
-                scatter = ax.scatter(
-                    x_um, y_um, c=color_by, cmap='viridis',
-                    s=marker_size, alpha=alpha
-                )
-                cbar = plt.colorbar(scatter, ax=ax)
-                cbar.set_label(color_label, rotation=270, labelpad=20)
-            else:
-                ax.scatter(x_um, y_um, s=marker_size, alpha=alpha, c='blue')
+        # Panel 1: Density + field
+        ax1.pcolormesh(
+            x, r, frame_data['n_e'],
+            cmap='Greys',
+            norm=colors.LogNorm(vmin=density_vmin, vmax=density_vmax),
+            shading='auto'
+        )
+        ax1.pcolormesh(
+            x, r, frame_data['E_tot'],
+            cmap='PuRd', vmin=0, vmax=field_vmax,
+            alpha=0.2, shading='auto'
+        )
+        ax1.set_ylabel(r"$r\: /\: \lambda_{0}$")
+        ax1.set_xlabel(r"$x\: /\: \lambda_{0}$")
+        ax1.set_ylim(r[0], r_max)
+        ax1.set_title(
+            f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {time_omega_pe:.0f}$",
+            loc='left', fontsize=12
+        )
 
-            ax.set_xlabel('x [μm]')
-            ax.set_ylabel('y [μm]')
-            ax.set_title(title)
-            ax.grid(True, alpha=0.3)
+        # Panel 2: Phase space
+        pdata = frame_data['particles']
+        ax2.scatter(
+            pdata['x_he'], pdata['px_he'],
+            s=2, c='r', alpha=0.5, marker='.', linewidths=0
+        )
+        ax2.set_ylabel(r"$p_x\: /\: m_{e}c$")
+        ax2.set_xlabel(r"$x\: /\: \lambda_{0}$")
+        ax2.set_ylim(px_ylim)
+        ax2.set_xlim(x[0], x[-1])
+        ax2.legend(handles=[Line2D([0], [0], color='red', lw=1, label='Plasma e-')],
+                  frameon=True, framealpha=0, loc="upper left")
 
-            plt.tight_layout()
-            png_path = self.output_dir / f'{output_name}.png'
-            plt.savefig(png_path, dpi=dpi, bbox_inches='tight')
-            plt.close()
-            print(f"Saved PNG: {png_path}")
+        # Panel 3: Momentum distribution
+        ax3.plot(frame_data['px_centers'], frame_data['px_dist'],
+                color='red', label='Plasma e-')
+        ax3.set_xlabel(r"$p_x\: /\: m_e c$")
+        ax3.set_ylabel(r"$dN\:/\:dp_x$")
+        ax3.set_xlim(frame_data['px_centers'][0], frame_data['px_centers'][-1])
+        ax3.set_ylim(0, np.max(frame_data['px_dist']) * 1.1)
+        ax3.legend(frameon=True, framealpha=0, loc="upper right")
 
-        # Interactive HTML plot
-        if save_html:
-            fig = go.Figure()
+        fig.tight_layout()
 
-            if color_by is not None:
-                fig.add_trace(go.Scatter(
-                    x=x_um,
-                    y=y_um,
-                    mode='markers',
-                    marker=dict(
-                        size=marker_size * 2,
-                        color=color_by,
-                        colorscale='Viridis',
-                        showscale=True,
-                        colorbar=dict(title=color_label),
-                        opacity=alpha
-                    ),
-                    name='Particles'
-                ))
-            else:
-                fig.add_trace(go.Scatter(
-                    x=x_um,
-                    y=y_um,
-                    mode='markers',
-                    marker=dict(size=marker_size * 2, opacity=alpha),
-                    name='Particles'
-                ))
+        # Save
+        output_path = self.output_dir / f"{output_name}.png"
+        plt.savefig(output_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
 
-            fig.update_layout(
-                title=title,
-                xaxis_title='x [μm]',
-                yaxis_title='y [μm]',
-                height=600,
-                width=900
-            )
-
-            html_path = self.output_dir / f'{output_name}.html'
-            fig.write_html(str(html_path))
-            print(f"Saved HTML: {html_path}")
+        print(f"Saved static frame: {output_path}")

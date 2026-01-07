@@ -1,147 +1,181 @@
 """
-Data processing utilities for PIC simulation data.
+Data processing utilities for EPOCH quasi-3D PIC simulations.
 """
 
 import numpy as np
-from typing import Dict, Tuple, Optional
-from scipy import ndimage
+from typing import Dict, List, Tuple, Optional
+from utils.physics import M_E, C_LIGHT, compute_kinetic_energy_MeV
 
 
 class DataProcessor:
-    """Process and analyze PIC simulation data"""
+    """Process and analyze EPOCH quasi-3D simulation data"""
 
     @staticmethod
-    def normalize_field(data: np.ndarray, method: str = 'minmax') -> np.ndarray:
+    def compute_momentum_histogram(px: np.ndarray, weights: Optional[np.ndarray] = None,
+                                   bins: np.ndarray = None, n_bins: int = 2000,
+                                   px_min: float = 1, px_max: float = 10000,
+                                   log_bins: bool = True) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Normalize field data.
+        Compute weighted momentum histogram.
 
         Args:
-            data: Input array
-            method: Normalization method ('minmax', 'std', 'none')
+            px: Momentum array (normalized to m_e*c)
+            weights: Particle weights
+            bins: Explicit bin edges (if provided, overrides n_bins/px_min/px_max)
+            n_bins: Number of bins (if bins not provided)
+            px_min: Minimum momentum for binning
+            px_max: Maximum momentum for binning
+            log_bins: Use log-spaced bins
 
         Returns:
-            Normalized array
+            (bin_centers, histogram) tuple
         """
-        if method == 'minmax':
-            min_val, max_val = np.min(data), np.max(data)
-            if max_val - min_val > 0:
-                return (data - min_val) / (max_val - min_val)
-            return data
-        elif method == 'std':
-            mean, std = np.mean(data), np.std(data)
-            if std > 0:
-                return (data - mean) / std
-            return data - mean
-        else:
-            return data
+        if weights is None:
+            weights = np.ones_like(px)
+
+        if bins is None:
+            if log_bins:
+                bins = np.logspace(np.log10(px_min), np.log10(px_max), n_bins + 1)
+            else:
+                bins = np.linspace(px_min, px_max, n_bins + 1)
+
+        hist, _ = np.histogram(px, bins=bins, weights=weights)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+
+        return bin_centers, hist
 
     @staticmethod
-    def compute_particle_energy(px: np.ndarray, py: np.ndarray, pz: np.ndarray,
-                               rest_energy_MeV: float = 0.511) -> np.ndarray:
+    def compute_energy_histogram(px: np.ndarray, pr: np.ndarray = None,
+                                 weights: Optional[np.ndarray] = None,
+                                 n_bins: int = 100,
+                                 energy_range: Optional[Tuple[float, float]] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Compute particle energy from momentum.
+        Compute particle energy histogram.
 
         Args:
-            px, py, pz: Momentum components (in units of m*c)
-            rest_energy_MeV: Rest mass energy in MeV (default: electron)
-
-        Returns:
-            Energy in MeV
-        """
-        p_squared = px**2 + py**2 + pz**2
-        gamma = np.sqrt(1 + p_squared)
-        energy_MeV = (gamma - 1) * rest_energy_MeV
-        return energy_MeV
-
-    @staticmethod
-    def compute_energy_spectrum(px: np.ndarray, py: np.ndarray, pz: np.ndarray,
-                                weight: Optional[np.ndarray] = None,
-                                bins: int = 50,
-                                energy_range: Optional[Tuple[float, float]] = None
-                                ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Compute particle energy spectrum.
-
-        Args:
-            px, py, pz: Momentum components
-            weight: Particle weights
-            bins: Number of histogram bins
+            px: Longitudinal momentum (m_e*c units)
+            pr: Radial momentum (m_e*c units, optional)
+            weights: Particle weights
+            n_bins: Number of bins
             energy_range: (E_min, E_max) in MeV
 
         Returns:
-            (energy_bins, spectrum) tuple
+            (energy_bins, histogram) tuple
         """
-        energy = DataProcessor.compute_particle_energy(px, py, pz)
+        if pr is None:
+            pr = np.zeros_like(px)
 
-        if weight is None:
-            weight = np.ones_like(energy)
+        pz = np.zeros_like(px)  # Assume no z-momentum in quasi-3D
+        energy_MeV = compute_kinetic_energy_MeV(px, pr, pz)
+
+        if weights is None:
+            weights = np.ones_like(px)
 
         if energy_range is None:
-            energy_range = (0, np.max(energy) * 1.1)
+            energy_range = (0, np.max(energy_MeV) * 1.1)
 
-        spectrum, bin_edges = np.histogram(
-            energy, bins=bins, range=energy_range, weights=weight
-        )
-        energy_bins = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+        hist, bin_edges = np.histogram(energy_MeV, bins=n_bins, range=energy_range, weights=weights)
+        energy_bins = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
-        return energy_bins, spectrum
+        return energy_bins, hist
 
     @staticmethod
-    def smooth_field(data: np.ndarray, sigma: float = 1.0) -> np.ndarray:
-        """
-        Smooth field data using Gaussian filter.
-
-        Args:
-            data: Input array
-            sigma: Standard deviation for Gaussian kernel
-
-        Returns:
-            Smoothed array
-        """
-        return ndimage.gaussian_filter(data, sigma=sigma)
-
-    @staticmethod
-    def compute_divergence(px: np.ndarray, py: np.ndarray, pz: np.ndarray) -> np.ndarray:
-        """
-        Compute beam divergence angles.
-
-        Args:
-            px, py, pz: Momentum components
-
-        Returns:
-            Divergence angles in radians
-        """
-        p_total = np.sqrt(px**2 + py**2 + pz**2)
-        p_trans = np.sqrt(py**2 + pz**2)
-        divergence = np.arctan2(p_trans, np.abs(px))
-        return divergence
-
-    @staticmethod
-    def downsample_field(data: np.ndarray, factor: int = 2) -> np.ndarray:
-        """
-        Downsample field data for faster plotting.
-
-        Args:
-            data: Input array
-            factor: Downsampling factor
-
-        Returns:
-            Downsampled array
-        """
-        if factor <= 1:
-            return data
-        return data[::factor, ::factor]
-
-    @staticmethod
-    def compute_charge(weight: np.ndarray) -> float:
+    def compute_charge(weights: np.ndarray) -> float:
         """
         Compute total charge from particle weights.
 
         Args:
-            weight: Particle weights (in Coulombs)
+            weights: Particle weights in Coulombs
 
         Returns:
             Total charge in pC (picoCoulombs)
         """
-        total_charge_C = np.sum(weight)
-        return total_charge_C * 1e12  # Convert to pC
+        return np.sum(weights) * 1e12
+
+    @staticmethod
+    def downsample_field(data: np.ndarray, factor_x: int = 1, factor_r: int = 1) -> np.ndarray:
+        """
+        Downsample 2D field data.
+
+        Args:
+            data: Input array (nx, nr)
+            factor_x: Downsampling factor in x
+            factor_r: Downsampling factor in r
+
+        Returns:
+            Downsampled array
+        """
+        return data[::factor_x, ::factor_r]
+
+    @staticmethod
+    def filter_particles_by_energy(px: np.ndarray, pr: np.ndarray,
+                                   weights: np.ndarray,
+                                   x: np.ndarray, r: np.ndarray,
+                                   energy_min: float = 0,
+                                   energy_max: float = np.inf) -> Dict[str, np.ndarray]:
+        """
+        Filter particles by energy range.
+
+        Args:
+            px, pr: Momentum arrays (m_e*c units)
+            weights: Particle weights
+            x, r: Position arrays
+            energy_min, energy_max: Energy range in MeV
+
+        Returns:
+            Dict with filtered arrays
+        """
+        pz = np.zeros_like(px)
+        energy = compute_kinetic_energy_MeV(px, pr, pz)
+
+        mask = (energy >= energy_min) & (energy <= energy_max)
+
+        return {
+            'px': px[mask],
+            'pr': pr[mask],
+            'x': x[mask],
+            'r': r[mask],
+            'weight': weights[mask],
+            'energy': energy[mask]
+        }
+
+    @staticmethod
+    def compute_beam_statistics(px: np.ndarray, pr: np.ndarray,
+                                weights: Optional[np.ndarray] = None) -> Dict[str, float]:
+        """
+        Compute beam quality statistics.
+
+        Args:
+            px, pr: Momentum arrays (m_e*c units)
+            weights: Particle weights
+
+        Returns:
+            Dict with statistical quantities
+        """
+        if weights is None:
+            weights = np.ones_like(px)
+
+        pz = np.zeros_like(px)
+        energy = compute_kinetic_energy_MeV(px, pr, pz)
+
+        # Weighted statistics
+        total_weight = np.sum(weights)
+        mean_energy = np.average(energy, weights=weights)
+        std_energy = np.sqrt(np.average((energy - mean_energy)**2, weights=weights))
+
+        mean_px = np.average(px, weights=weights)
+        std_px = np.sqrt(np.average((px - mean_px)**2, weights=weights))
+
+        # Divergence (transverse momentum over longitudinal)
+        divergence = pr / (np.abs(px) + 1e-9)
+        mean_divergence = np.average(np.abs(divergence), weights=weights)
+
+        return {
+            'mean_energy_MeV': mean_energy,
+            'std_energy_MeV': std_energy,
+            'energy_spread': std_energy / (mean_energy + 1e-9),
+            'mean_px': mean_px,
+            'std_px': std_px,
+            'mean_divergence': mean_divergence,
+            'total_charge_pC': total_weight * 1e12,
+        }

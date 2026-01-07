@@ -1,204 +1,133 @@
 # PIC Post-Processing Pipeline
 
-A comprehensive data processing and visualization pipeline for Particle-in-Cell (PIC) simulation data, with focus on Laser Wakefield Acceleration (LWFA) simulations.
+Comprehensive data processing and visualization pipeline for **EPOCH quasi-3D** Particle-in-Cell (PIC) simulations, with focus on Laser Wakefield Acceleration (LWFA).
 
 ## Features
 
-- **Multi-format Support**: Load data from EPOCH (SDF) and Smilei (HDF5) simulations
-- **Rich Visualizations**: Generate both interactive HTML plots and publication-quality PNG figures
-- **Custom Colormaps**: Specialized colormaps for plasma physics (grayscale density, transparent divergent fields)
-- **Comprehensive Analysis**: Energy spectra, phase space plots, field distributions, beam diagnostics
-- **Synthetic Data**: Built-in LWFA data generator for testing and examples
-- **Easy to Use**: Simple API with sensible defaults
+- **EPOCH Quasi-3D Support**: Native support for modal field decomposition and cylindrical geometry
+- **3-Panel Animated Visualizations**: Density + field overlay, phase space, and momentum distribution
+- **HPC-Compatible**: Agg backend, progress bars, batch processing optimized for cluster environments
+- **Physical Normalization**: Proper normalization to laser wavelength, plasma frequency, and critical density
+- **Publication-Quality Styling**: STIX fonts, logarithmic density plots, transparent field overlays
 
-## Installation
+## Visualization Style
 
-### Requirements
+Matching the proven EPOCH post-processing workflow:
 
-- Python 3.9 or higher
-- pip package manager
+- **Density**: Grayscale with logarithmic normalization
+- **E-field Overlay**: Semi-transparent PuRd colormap (pink-red) at 20% opacity
+- **3-Panel Layout**:
+  1. 2D density + transverse field (moving window supported)
+  2. Longitudinal phase space (x-px scatter)
+  3. Momentum distribution (dN/dpx line plot)
 
-### Install from source
+## Quick Start
+
+### 1. Installation
 
 ```bash
 git clone https://github.com/yourusername/Post-processing-PIC.git
 cd Post-processing-PIC
-pip install -e .
+pip install -r requirements.txt
 ```
 
-### Dependencies
+#### Dependencies
+- Python 3.9+
+- NumPy, SciPy, Matplotlib
+- h5py (for synthetic data)
+- **Optional**: `sdf_helper` (compiled from EPOCH for real SDF files)
 
-Core dependencies are automatically installed:
-- numpy, scipy, pandas
-- matplotlib, plotly
-- h5py (for HDF5 files)
-- sdf (for EPOCH SDF files)
-
-For Jupyter notebook support:
+To compile `sdf_helper`:
 ```bash
-pip install jupyter ipywidgets
+cd /path/to/epoch/epoch2d
+make sdfutils
+# Add to PYTHONPATH or copy to your Python site-packages
 ```
 
-## Quick Start
-
-### 1. Generate Example Data
+### 2. Generate Example Data
 
 ```bash
-python examples/scripts/generate_example_data.py
+python examples/scripts/generate_epoch_data.py
 ```
 
-This creates synthetic LWFA simulation data in `examples/data/example_lwfa.h5`.
+This creates synthetic EPOCH quasi-3D LWFA data in `examples/data/epoch_lwfa_example.h5`.
 
-### 2. Run the Processing Pipeline
+### 3. Run the Pipeline
 
 ```bash
-python examples/scripts/process_lwfa_data.py
+python examples/scripts/process_epoch_lwfa.py
 ```
 
-This generates visualizations in the `output/` directory:
-- Interactive HTML plots for exploration
-- High-quality PNG images for publications
+**Outputs** (in `post-process-output/`):
+- `lwfa_q3d_animation.html` - Interactive 3-panel animation
+- `lwfa_q3d_*.npy` - Processed data arrays for reuse
 
-### 3. Explore with Jupyter
+## Usage
 
-```bash
-jupyter notebook examples/notebooks/lwfa_analysis_example.ipynb
-```
+### Processing EPOCH Simulations
 
-## Usage Examples
-
-### Loading Data
+The main processing script mirrors the working `post-process-lwfa.py` structure:
 
 ```python
-from pipeline.loaders import load_data
+# Configure your simulation parameters
+CONFIG = {
+    # Laser parameters
+    'lambda0_um': 1.0,              # Laser wavelength [μm]
+    'a0': 3.0,                      # Normalized vector potential
 
-# Auto-detect format (SDF or HDF5)
-loader = load_data('simulation_output.h5')
+    # Plasma parameters
+    'n_over_nc': 0.0025,            # n_e / n_c
 
-# Load fields
-density_data = loader.load_field('Rho_electron')
-n_e = density_data['data']
-x = density_data['grid_x']
-y = density_data['grid_y']
+    # Visualization
+    'density_vmin': 1e-4,
+    'density_vmax': 1.0,
+    'field_vmax': 5.0,
+    'r_max_lambda0': 130,
 
-# Load particles
-particles = loader.load_particles('electron')
-x_particles = particles['x']
-px_particles = particles['px']
+    # Output
+    'output_dir': 'post-process-output',
+}
 ```
 
-### Processing Data
+### Loading EPOCH Data
 
 ```python
-from pipeline.processors import DataProcessor
+from pipeline.loaders import EPOCHLoader
+from utils.physics import compute_derived_quantities
 
-processor = DataProcessor()
+# Compute physical parameters
+params = compute_derived_quantities(CONFIG)
 
-# Compute particle energies
-energy_MeV = processor.compute_particle_energy(
-    particles['px'], particles['py'], particles['pz']
-)
+# Load a single frame
+loader = EPOCHLoader('E_field0060.sdf', use_sdf_helper=True)
+frame = loader.load_frame(params=params, downsample_x=10, downsample_r=1)
 
-# Compute energy spectrum
-energy_bins, spectrum = processor.compute_energy_spectrum(
-    particles['px'], particles['py'], particles['pz'],
-    weight=particles['weight']
-)
-
-# Calculate total charge
-charge_pC = processor.compute_charge(particles['weight'])
+# Access data (all normalized)
+x = frame['x']              # Grid in λ0 units
+r = frame['r']
+n_e = frame['n_e']          # Density / n_c
+E_tot = frame['E_tot']      # Transverse field (normalized)
+E_x = frame['E_x']          # Longitudinal field (normalized)
+px = frame['px_particles']  # Momentum in m_e*c units
 ```
 
 ### Creating Visualizations
 
 ```python
-from pipeline.visualizers import Visualizer
+from pipeline.visualizers import EPOCHVisualizer
+from pipeline.processors import DataProcessor
 
-visualizer = Visualizer(output_dir='output')
-
-# Density with E-field overlay (grayscale + transparent seismic)
-visualizer.plot_density_with_field_overlay(
-    x=x, y=y,
-    density=n_e,
-    field=E_y,
-    output_name='density_field',
-    save_png=True,
-    save_html=True
+# Process data
+processor = DataProcessor()
+px_bins, px_hist = processor.compute_momentum_histogram(
+    px_particles, weights=weights, log_bins=True
 )
 
-# Phase space plot
-visualizer.plot_phase_space(
-    x=particles['x'],
-    px=particles['px'],
-    weight=particles['weight'],
-    output_name='phase_x_px'
-)
-
-# Energy spectrum
-visualizer.plot_energy_spectrum(
-    energy=energy_bins,
-    spectrum=spectrum,
-    output_name='spectrum'
-)
+# Create animation
+visualizer = EPOCHVisualizer(output_dir='output')
+fig, anim = visualizer.create_3panel_animation(data, CONFIG, params)
+visualizer.save_animation_html(anim, 'my_lwfa_simulation')
 ```
-
-## Supported File Formats
-
-### EPOCH (SDF Format)
-
-EPOCH is a PIC code that outputs data in SDF format. Fields and particles are accessed by their standard names:
-
-```python
-loader = load_data('output.sdf', format='sdf')
-
-# Fields: 'Electric_Field_Ex', 'Electric_Field_Ey', 'Derived_Number_Density_electron', etc.
-field = loader.load_field('Electric_Field_Ex')
-
-# Particles: 'electron', 'proton', etc.
-particles = loader.load_particles('electron')
-```
-
-### Smilei (HDF5 Format)
-
-Smilei outputs HDF5 files with a structured hierarchy:
-
-```python
-loader = load_data('output.h5', format='hdf5')
-
-# Fields stored in /Fields/ or /Rho/
-field = loader.load_field('Ex')
-density = loader.load_field('Rho_electron')
-
-# Particles stored in /Species/
-particles = loader.load_particles('electron')
-```
-
-## Visualization Outputs
-
-### Interactive HTML Plots
-
-- Zoomable and pannable
-- Hover information
-- Export to PNG from browser
-- Shareable and embeddable
-
-### Publication-Quality PNGs
-
-- Customizable DPI (default: 150)
-- Vector-like quality
-- Ready for manuscript submission
-- Configurable figure size
-
-### Custom Colormaps
-
-#### Grayscale Density
-Standard grayscale colormap for electron density visualization, providing clear contrast for plasma structures.
-
-#### Transparent Seismic Field Overlay
-Divergent colormap (blue-to-red) with transparency near zero values. Perfect for overlaying transverse electric fields on density maps:
-- Blue: Negative field values
-- Transparent: Near-zero values (doesn't obscure density)
-- Red: Positive field values
 
 ## Project Structure
 
@@ -206,23 +135,21 @@ Divergent colormap (blue-to-red) with transparency near zero values. Perfect for
 Post-processing-PIC/
 ├── src/
 │   ├── pipeline/
-│   │   ├── loaders.py          # Data loading (SDF, HDF5)
-│   │   ├── processors.py       # Data processing & analysis
-│   │   └── visualizers.py      # Visualization generation
+│   │   ├── loaders.py          # EPOCH SDF/HDF5 data loading with modal reconstruction
+│   │   ├── processors.py       # Data processing (histograms, beam stats)
+│   │   └── visualizers.py      # 3-panel animation visualization
 │   └── utils/
-│       └── synthetic_data.py   # Synthetic LWFA data generator
+│       ├── physics.py          # Physical constants and normalization
+│       ├── hpc.py              # HPC utilities (progress bars, file finding)
+│       └── synthetic_data.py   # EPOCH quasi-3D synthetic data generator
 ├── examples/
 │   ├── scripts/
-│   │   ├── generate_example_data.py
-│   │   └── process_lwfa_data.py
-│   ├── notebooks/
-│   │   └── lwfa_analysis_example.ipynb
-│   └── data/                   # Example datasets
-├── tests/                      # Unit tests
-├── docs/                       # Documentation
-├── output/                     # Default output directory
+│   │   ├── generate_epoch_data.py     # Generate synthetic test data
+│   │   └── process_epoch_lwfa.py      # Complete processing pipeline
+│   └── data/                          # Example datasets
+├── working-script/
+│   └── post-process-lwfa.py    # Reference implementation
 ├── requirements.txt
-├── setup.py
 └── README.md
 ```
 
@@ -231,93 +158,177 @@ Post-processing-PIC/
 ### Batch Processing Multiple Files
 
 ```python
-from pathlib import Path
-from pipeline.loaders import load_data
-from pipeline.visualizers import Visualizer
+from utils.hpc import find_sdf_files, progress_bar
 
-data_dir = Path('simulations')
-visualizer = Visualizer(output_dir='batch_output')
+# Find all matching SDF files
+indices = find_sdf_files('E_field*.sdf', directory='./sims/run01')
 
-for data_file in data_dir.glob('*.h5'):
-    loader = load_data(data_file)
-    density = loader.load_field('Rho_electron')
-
-    output_name = data_file.stem
-    visualizer.plot_density_with_field_overlay(
-        x=density['grid_x'],
-        y=density['grid_y'],
-        density=density['data'],
-        field=loader.load_field('Ey')['data'],
-        output_name=output_name
-    )
+for i, idx in enumerate(indices):
+    progress_bar(i+1, len(indices), 'Processing')
+    filepath = f'E_field{idx:04d}.sdf'
+    # Process frame...
 ```
 
-### Custom Colormap Settings
+### Custom Momentum Histograms
 
 ```python
-# Adjust field overlay transparency and smoothing
-visualizer.plot_density_with_field_overlay(
-    x=x, y=y,
-    density=n_e,
-    field=E_y,
-    smooth_density=1.0,      # Gaussian smoothing sigma
-    smooth_field=0.5,         # Less smoothing for fields
-    field_symmetric=True,     # Symmetric colormap around zero
-    figsize=(16, 8),          # Larger figure
-    dpi=300                   # Higher resolution
+# Log-spaced bins for wide dynamic range
+px_bins = np.logspace(np.log10(1), np.log10(10000), 2000)
+bin_centers, hist = processor.compute_momentum_histogram(
+    px, weights=weights, bins=px_bins
 )
 ```
 
-### Energy Spectrum Analysis
+### Beam Statistics
 
 ```python
-# Compute spectrum with custom bins
-energy_bins, spectrum = processor.compute_energy_spectrum(
-    particles['px'], particles['py'], particles['pz'],
-    weight=particles['weight'],
-    bins=100,
-    energy_range=(0, 500)  # MeV
-)
-
-# Calculate statistics
-peak_energy = energy_bins[np.argmax(spectrum)]
-mean_energy = np.average(energy_bins, weights=spectrum)
-print(f"Peak energy: {peak_energy:.2f} MeV")
-print(f"Mean energy: {mean_energy:.2f} MeV")
+stats = processor.compute_beam_statistics(px, pr, weights)
+print(f"Mean energy: {stats['mean_energy_MeV']:.2f} MeV")
+print(f"Energy spread: {stats['energy_spread']*100:.1f}%")
+print(f"Total charge: {stats['total_charge_pC']:.2f} pC")
 ```
 
-## Synthetic Data Generator
+## Physical Normalization
 
-Generate realistic LWFA simulation data for testing:
+The pipeline uses consistent normalization matching EPOCH conventions:
+
+- **Lengths**: Normalized to laser wavelength λ₀
+- **Density**: Normalized to critical density n_c = ε₀ m_e ω₀² / e²
+- **Transverse E-fields**: Normalized to m_e c ω₀ / e
+- **Longitudinal E-fields**: Normalized to m_e c ω_pe / e
+- **Momentum**: Normalized to m_e c
+- **Time**: Normalized to ω_pe⁻¹
+
+All derived quantities are computed automatically from your laser and plasma parameters.
+
+## Configuration Options
+
+### Visualization Parameters
 
 ```python
-from utils.synthetic_data import generate_lwfa_data
+CONFIG = {
+    # Density plot (log scale)
+    'density_vmin': 1e-4,       # Minimum density (n_e/n_c)
+    'density_vmax': 1.0,        # Maximum density
 
-data = generate_lwfa_data(
-    output_path='test_data.h5',
-    nx=400,                    # Grid points in x
-    ny=200,                    # Grid points in y
-    n_particles=10000,         # Number of particles
-    plasma_density=1e24,       # Background density (m^-3)
-    laser_a0=2.0,              # Normalized laser amplitude
-    seed=42                    # Random seed
-)
+    # Field overlay
+    'field_vmax': 5.0,          # Max transverse field (normalized)
+
+    # Spatial extent
+    'r_max_lambda0': 130,       # Max radial extent [λ₀]
+
+    # Phase space
+    'px_ylim': (1, 10000),      # Momentum range [m_e c]
+
+    # Momentum histogram
+    'n_px_bins': 2000,          # Number of bins
+    'px_min': 1,                # Min momentum
+    'px_max': 10000,            # Max momentum
+
+    # Animation
+    'animation_interval': 50,   # ms between frames
+}
 ```
 
-The generator creates:
-- Electron density with wakefield structure (bubble regime)
-- Transverse electric field (laser + wakefield)
-- Longitudinal electric field (acceleration field)
-- Accelerated electron beam with realistic energy distribution
+### Downsampling for Performance
+
+```python
+# Reduce data size for faster plotting
+CONFIG['downsample_x'] = 10   # Keep every 10th point in x
+CONFIG['downsample_r'] = 1    # Keep all points in r
+```
+
+## Output Files
+
+### Processed Data (.npy files)
+
+The pipeline saves intermediate results for quick replotting:
+
+- `lwfa_q3d_E_x.npy` - Longitudinal electric field
+- `lwfa_q3d_E_tot.npy` - Transverse electric field magnitude
+- `lwfa_q3d_n_e.npy` - Electron density
+- `lwfa_q3d_x.npy`, `lwfa_q3d_r.npy` - Grid coordinates
+- `lwfa_q3d_px_centers.npy` - Momentum bin centers
+- `lwfa_q3d_px_dist.npy` - Momentum distributions
+
+### Animation (HTML)
+
+Self-contained HTML file with embedded JavaScript animation. Can be:
+- Viewed in any web browser
+- Shared via email/cloud
+- Embedded in websites or presentations
+
+## Working with Real EPOCH Data
+
+When processing actual EPOCH simulations:
+
+1. **Set up file patterns** in CONFIG:
+   ```python
+   CONFIG['dens_pattern'] = 'dens*.sdf'
+   CONFIG['efield_pattern'] = 'E_field{:04d}.sdf'
+   CONFIG['ener_pattern'] = 'ener{:04d}.sdf'
+   ```
+
+2. **Run in simulation directory**:
+   ```bash
+   cd /path/to/epoch/output
+   cp /path/to/process_epoch_lwfa.py .
+   # Edit CONFIG in script
+   python process_epoch_lwfa.py
+   ```
+
+3. **Enable sdf_helper**:
+   ```python
+   loader = EPOCHLoader('E_field0060.sdf', use_sdf_helper=True)
+   ```
+
+## Quasi-3D Modal Field Reconstruction
+
+EPOCH quasi-3D stores fields as modal coefficients:
+
+F(x,r,θ) = F₀(x,r) + F₁(x,r)cos(θ) + F₁ᵢ(x,r)sin(θ)
+
+The pipeline automatically reconstructs physical fields at θ=0 (y-direction) and θ=π/2 (z-direction):
+
+```python
+from pipeline.loaders import reconstruct_field_from_modes
+
+E_y = reconstruct_field_from_modes(Erm_real, Erm_imag, theta=0)
+E_z = reconstruct_field_from_modes(Erm_real, Erm_imag, theta=np.pi/2)
+```
+
+## Troubleshooting
+
+### Import Errors
+
+If you see import errors, ensure `src/` is in your Python path:
+```python
+import sys
+sys.path.insert(0, '/path/to/Post-processing-PIC/src')
+```
+
+### sdf_helper Not Found
+
+For synthetic data testing, the pipeline falls back to HDF5:
+```python
+loader = EPOCHLoader(filepath, use_sdf_helper=False)
+```
+
+For real EPOCH data, compile sdf_helper from EPOCH source.
+
+### Memory Issues with Large Simulations
+
+- Increase downsampling factors
+- Process frames individually instead of loading all at once
+- Use lower resolution for quick previews
 
 ## Contributing
 
-Contributions are welcome! Areas for improvement:
-- Additional PIC code support (WarpX, OSIRIS, FBPIC)
-- More analysis tools (emittance, beam quality)
-- 3D visualization support
-- Animation generation
-- Performance optimization
+Contributions welcome! Priority areas:
+- Support for additional PIC codes (Smilei, WarpX, OSIRIS)
+- 3D visualization capabilities
+- Advanced beam diagnostics (emittance, betatron radiation)
+- Parameter scan automation tools
 
 ## License
 
@@ -325,23 +336,18 @@ MIT License - see LICENSE file for details
 
 ## Citation
 
-If you use this pipeline in your research, please cite:
+If you use this pipeline in your research:
 
 ```bibtex
-@software{pic_postprocessing,
-  title = {PIC Post-Processing Pipeline},
+@software{pic_postprocessing_epoch,
+  title = {EPOCH PIC Post-Processing Pipeline},
   author = {Your Name},
   year = {2024},
   url = {https://github.com/yourusername/Post-processing-PIC}
 }
 ```
 
-## Support
-
-For issues, questions, or suggestions:
-- Open an issue on GitHub
-- Contact: your.email@example.com
-
 ## Acknowledgments
 
-Developed for processing laser wakefield acceleration simulation data from EPOCH and Smilei PIC codes.
+Built for processing EPOCH quasi-3D laser wakefield acceleration simulations.
+Based on proven HPC post-processing workflows.
