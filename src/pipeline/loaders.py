@@ -188,7 +188,35 @@ class EPOCHLoader:
 
     def _load_density_sdf(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
         """Load density from EPOCH SDF file."""
-        n_e = self.data.Derived_Number_Density_Subset_total_e.data
+        # Try common density field names in EPOCH
+        possible_names = [
+            'Derived_Number_Density_Subset_total_e',  # Total electrons
+            'Derived_Number_Density_electron',         # Electron species
+            'Derived_Number_Density_Electron',         # Capital E variant
+            'Number_Density_electron',                 # Without Derived prefix
+            'Derived_Number_Density_Subset_electron',  # Alternative subset name
+        ]
+        
+        n_e = None
+        found_name = None
+        
+        for name in possible_names:
+            attr_name = name.replace('/', '_')
+            if hasattr(self.data, attr_name):
+                n_e = getattr(self.data, attr_name).data
+                found_name = name
+                break
+        
+        if n_e is None:
+            # List available fields to help user
+            available = [attr for attr in dir(self.data) if not attr.startswith('_')]
+            density_fields = [f for f in available if 'density' in f.lower() or 'number' in f.lower()]
+            raise ValueError(
+                f"Could not find electron density field in SDF file.\n"
+                f"Tried: {possible_names}\n"
+                f"Available density-like fields: {density_fields}\n"
+                f"All fields: {available[:20]}... (showing first 20)"
+            )
 
         result = {'n_e': n_e}
 
@@ -228,9 +256,26 @@ class EPOCHLoader:
 
     def _load_grid_sdf(self, params: Optional[Dict] = None) -> Dict[str, np.ndarray]:
         """Load grid from EPOCH SDF file."""
-        grid_data = self.data.Grid_Grid_mid.data
-        x = grid_data[0]
-        r = grid_data[1]
+        # EPOCH stores grid as separate attributes or in Grid_Grid_mid
+        if hasattr(self.data, 'Grid_Grid_mid'):
+            grid_data = self.data.Grid_Grid_mid.data
+            x = grid_data[0]
+            r = grid_data[1]
+        elif hasattr(self.data, 'Grid_Grid'):
+            grid_data = self.data.Grid_Grid.data
+            x = grid_data[0]
+            r = grid_data[1]
+        else:
+            # Try individual grid arrays
+            if hasattr(self.data, 'Grid_grid_mid'):
+                grid_mid = self.data.Grid_grid_mid.data
+                x = grid_mid[0]
+                r = grid_mid[1]
+            else:
+                raise ValueError(
+                    f"Could not find grid data in SDF file. "
+                    f"Available Grid attributes: {[a for a in dir(self.data) if 'Grid' in a or 'grid' in a]}"
+                )
 
         result = {'x': x, 'r': r}
 
@@ -348,6 +393,38 @@ class EPOCHLoader:
                 result['pr_norm'] = result['pr'] / (M_E * C_LIGHT)
 
         return result
+
+
+    def list_available_fields(self) -> Dict[str, List[str]]:
+        """
+        List all available fields in the SDF file for debugging.
+        
+        Returns:
+            Dict with categorized field names
+        """
+        if not self.use_sdf_helper:
+            return {'error': ['Only works with sdf_helper mode']}
+        
+        all_attrs = [attr for attr in dir(self.data) if not attr.startswith('_')]
+        
+        # Categorize fields
+        fields = {
+            'electric': [f for f in all_attrs if 'Electric' in f or 'electric' in f],
+            'magnetic': [f for f in all_attrs if 'Magnetic' in f or 'magnetic' in f],
+            'density': [f for f in all_attrs if 'Density' in f or 'density' in f or 'Number' in f],
+            'particles': [f for f in all_attrs if 'Particles' in f or 'particles' in f],
+            'grid': [f for f in all_attrs if 'Grid' in f or 'grid' in f],
+            'other': [f for f in all_attrs if f not in 
+                     [item for sublist in [
+                         [x for x in all_attrs if 'Electric' in x or 'electric' in x],
+                         [x for x in all_attrs if 'Magnetic' in x or 'magnetic' in x],
+                         [x for x in all_attrs if 'Density' in x or 'density' in x or 'Number' in x],
+                         [x for x in all_attrs if 'Particles' in x or 'particles' in x],
+                         [x for x in all_attrs if 'Grid' in x or 'grid' in x],
+                     ] for item in sublist]]
+        }
+        
+        return fields
 
     def load_frame(self, params: Optional[Dict] = None,
                    downsample_x: int = 1, downsample_r: int = 1,
