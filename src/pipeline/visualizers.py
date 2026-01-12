@@ -12,8 +12,6 @@ import matplotlib.colors as colors
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 import numpy as np
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 # Configure matplotlib for publication-quality figures
 mpl.rcParams['axes.linewidth'] = 1
@@ -32,285 +30,162 @@ plt.rc('legend', fontsize=SMALL_SIZE)
 plt.rc('figure', titlesize=BIGGER_SIZE)
 
 
-class EPOCHVisualizer:
+def create_animation(data, params, config):
     """
-    Create visualizations for EPOCH quasi-3D LWFA data.
-    Matches the style from the working post-process-lwfa.py script.
+    Create 3-panel animation figure.
+
+    Panel 1: 2D density and field (pcolormesh)
+    Panel 2: Longitudinal phase space (scatter)
+    Panel 3: Momentum distribution (line plot)
+
+    Args:
+        data: Dict containing:
+            - E_x: List of E_x arrays (one per frame)
+            - E_tot: List of E_tot arrays
+            - n_e: List of density arrays
+            - x, r: List of grid arrays
+            - particles: List of particle dicts with 'x_he', 'px_he'
+            - px_dist: List of momentum histograms
+            - px_centers: Momentum bin centers
+        params: Physical parameters dict (for dumpstep)
+        config: Configuration dict with visualization parameters
+
+    Returns:
+        (fig, anim) tuple
     """
+    n_frames = len(data['x'])
+    dumpstep = params.get('dumpstep', 1.0)
+    a0 = config.get('a0', 3.0)
 
-    def __init__(self, output_dir: str = 'post-process-output'):
-        """
-        Initialize visualizer.
+    # Get visualization parameters
+    density_vmin = config.get('density_vmin', 1e-4)
+    density_vmax = config.get('density_vmax', 1.0)
+    field_vmax = config.get('field_vmax', 5.0)
+    r_max = config.get('r_max_lambda0', 130)
+    px_ylim = config.get('px_ylim', (1, 10000))
 
-        Args:
-            output_dir: Directory for saving output files
-        """
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    # Create figure with 3 subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        3, 1, figsize=(3.54, 2*3.54), dpi=200,
+        gridspec_kw={'height_ratios': [1.75, 1, 1]}
+    )
 
-    def create_3panel_animation(
-        self,
-        data: Dict,
-        config: Dict,
-        params: Dict,
-        output_name: str = 'lwfa_q3d_animation'
-    ) -> Tuple[plt.Figure, FuncAnimation]:
-        """
-        Create 3-panel animation figure matching the working script style.
+    # Initial data
+    x0, r0 = data['x'][0], data['r'][0]
 
-        Panel 1: 2D density + field overlay (pcolormesh)
-        Panel 2: Longitudinal phase space (scatter)
-        Panel 3: Momentum distribution (line plot)
+    # Panel 1: 2D density and field
+    plot_dens = ax1.pcolormesh(
+        x0, r0, data['n_e'][0],
+        cmap='Greys',
+        norm=colors.LogNorm(vmin=density_vmin, vmax=density_vmax),
+        shading='auto'
+    )
+    plot_field = ax1.pcolormesh(
+        x0, r0, data['E_tot'][0],
+        cmap='PuRd', vmin=0, vmax=field_vmax,
+        alpha=0.2, shading='auto'
+    )
+    ax1.set_ylabel(r"$r\: /\: \lambda_{0}$")
+    ax1.set_xlabel(r"$x\: /\: \lambda_{0}$")
+    ax1.set_ylim(r0[0], r_max)
+    ax1.set_title(
+        f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {0:.0f}$",
+        loc='left', fontsize=12
+    )
 
-        Args:
-            data: Dict containing:
-                - E_x: List of E_x arrays (one per frame)
-                - E_tot: List of E_tot arrays
-                - n_e: List of density arrays
-                - x, r: List of grid arrays
-                - particles: List of particle dicts with 'x_he', 'px_he'
-                - px_dist: List of momentum histograms
-                - px_centers: Momentum bin centers
-            config: Configuration dict with visualization parameters
-            params: Physical parameters dict (for dumpstep)
-            output_name: Base name for output file
+    # Panel 2: Phase space scatter
+    pdata = data['particles'][0]
+    scatter_he = ax2.scatter(
+        pdata['x_he'], pdata['px_he'],
+        s=2, c='r', alpha=0.5, marker='.', linewidths=0
+    )
+    ax2.set_ylabel(r"$p_x\: /\: m_{e}c$")
+    ax2.set_xlabel(r"$x\: /\: \lambda_{0}$")
+    ax2.set_ylim(px_ylim)
+    ax2.set_xlim(x0[0], x0[-1])
 
-        Returns:
-            (fig, anim) tuple
-        """
-        n_frames = len(data['x'])
-        dumpstep = params.get('dumpstep', 1.0)
-        a0 = config.get('a0', 3.0)
+    legend_handles = [Line2D([0], [0], color='red', lw=1, label='Plasma e-')]
+    ax2.legend(handles=legend_handles, frameon=True, framealpha=0, loc="upper left")
 
-        # Get visualization parameters
-        density_vmin = config.get('density_vmin', 1e-4)
-        density_vmax = config.get('density_vmax', 1.0)
-        field_vmax = config.get('field_vmax', 5.0)
-        r_max = config.get('r_max_lambda0', 130)
-        px_ylim = config.get('px_ylim', (1, 10000))
+    # Panel 3: Momentum distribution
+    px_centers = data['px_centers']
+    line_dist, = ax3.plot(px_centers, data['px_dist'][0], color='red', label='Plasma e-')
+    ax3.set_xlabel(r"$p_x\: /\: m_e c$")
+    ax3.set_ylabel(r"$dN\:/\:dp_x$")
+    ax3.set_xlim(px_centers[0], px_centers[-1])
 
-        # Create figure with 3 subplots
-        fig, (ax1, ax2, ax3) = plt.subplots(
-            3, 1, figsize=(3.54, 2*3.54), dpi=200,
-            gridspec_kw={'height_ratios': [1.75, 1, 1]}
-        )
+    # Auto-scale y-axis based on max histogram value
+    valid_hists = [np.max(h) for h in data['px_dist'] if len(h) > 0 and np.max(h) > 0]
+    max_hist = max(valid_hists) if valid_hists else 1.0
+    ax3.set_ylim(0, max_hist * 0.5)
 
-        # Initial data
-        x0, r0 = data['x'][0], data['r'][0]
+    ax3.legend(frameon=True, framealpha=0, loc="upper right")
 
-        # =====================================================================
-        # Panel 1: 2D density and field
-        # =====================================================================
+    fig.tight_layout()
 
-        plot_dens = ax1.pcolormesh(
-            x0, r0, data['n_e'][0],
+    # Store plot objects that need to be recreated each frame
+    plot_objects = {'dens': plot_dens, 'field': plot_field}
+
+    def animate(frame):
+        x = data['x'][frame]
+        r = data['r'][frame]
+
+        # Update Panel 1: density and field
+        # Remove old pcolormesh and create new ones (needed for moving window)
+        plot_objects['dens'].remove()
+        plot_objects['field'].remove()
+
+        plot_objects['dens'] = ax1.pcolormesh(
+            x, r, data['n_e'][frame],
             cmap='Greys',
             norm=colors.LogNorm(vmin=density_vmin, vmax=density_vmax),
             shading='auto'
         )
-        plot_field = ax1.pcolormesh(
-            x0, r0, data['E_tot'][0],
+        plot_objects['field'] = ax1.pcolormesh(
+            x, r, data['E_tot'][frame],
             cmap='PuRd', vmin=0, vmax=field_vmax,
             alpha=0.2, shading='auto'
         )
-        ax1.set_ylabel(r"$r\: /\: \lambda_{0}$")
-        ax1.set_xlabel(r"$x\: /\: \lambda_{0}$")
-        ax1.set_ylim(r0[0], r_max)
+
+        ax1.set_xlim(x[0], x[-1])
         ax1.set_title(
-            f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {0:.0f}$",
+            f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {frame * dumpstep:.0f}$",
             loc='left', fontsize=12
         )
 
-        # =====================================================================
-        # Panel 2: Phase space scatter
-        # =====================================================================
-
-        pdata = data['particles'][0]
-        scatter_he = ax2.scatter(
-            pdata['x_he'], pdata['px_he'],
-            s=2, c='r', alpha=0.5, marker='.', linewidths=0
-        )
-        ax2.set_ylabel(r"$p_x\: /\: m_{e}c$")
-        ax2.set_xlabel(r"$x\: /\: \lambda_{0}$")
-        ax2.set_ylim(px_ylim)
-        ax2.set_xlim(x0[0], x0[-1])
-
-        legend_handles = [Line2D([0], [0], color='red', lw=1, label='Plasma e-')]
-        ax2.legend(handles=legend_handles, frameon=True, framealpha=0, loc="upper left")
-
-        # =====================================================================
-        # Panel 3: Momentum distribution
-        # =====================================================================
-
-        px_centers = data['px_centers']
-        line_dist, = ax3.plot(px_centers, data['px_dist'][0], color='red', label='Plasma e-')
-        ax3.set_xlabel(r"$p_x\: /\: m_e c$")
-        ax3.set_ylabel(r"$dN\:/\:dp_x$")
-        ax3.set_xlim(px_centers[0], px_centers[-1])
-
-        # Auto-scale y-axis based on max histogram value
-        # Auto-scale y-axis based on max histogram value
-        valid_hists = [np.max(h) for h in data['px_dist'] if len(h) > 0 and np.max(h) > 0]
-        max_hist = max(valid_hists) if valid_hists else 1.0
-        ax3.set_ylim(0, max_hist * 0.5)
-
-        ax3.legend(frameon=True, framealpha=0, loc="upper right")
-
-        fig.tight_layout()
-
-        # Store plot objects that need to be recreated each frame
-        plot_objects = {'dens': plot_dens, 'field': plot_field}
-
-        # =====================================================================
-        # Animation update function
-        # =====================================================================
-
-        def animate(frame):
-            x = data['x'][frame]
-            r = data['r'][frame]
-
-            # Update Panel 1: density and field
-            # Remove old pcolormesh and create new ones (needed for moving window)
-            plot_objects['dens'].remove()
-            plot_objects['field'].remove()
-
-            plot_objects['dens'] = ax1.pcolormesh(
-                x, r, data['n_e'][frame],
-                cmap='Greys',
-                norm=colors.LogNorm(vmin=density_vmin, vmax=density_vmax),
-                shading='auto'
-            )
-            plot_objects['field'] = ax1.pcolormesh(
-                x, r, data['E_tot'][frame],
-                cmap='PuRd', vmin=0, vmax=field_vmax,
-                alpha=0.2, shading='auto'
-            )
-
-            ax1.set_xlim(x[0], x[-1])
-            ax1.set_title(
-                f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {frame * dumpstep:.0f}$",
-                loc='left', fontsize=12
-            )
-
-            # Update Panel 2: phase space
-            pdata = data['particles'][frame]
-            if pdata['x_he'].size and pdata['px_he'].size:
-                he_data = np.column_stack((pdata['x_he'], pdata['px_he']))
-                scatter_he.set_offsets(he_data)
-            else:
-                scatter_he.set_offsets(np.empty((0, 2)))
-            ax2.set_xlim(x[0], x[-1])
-
-            # Update Panel 3: momentum distribution
-            line_dist.set_ydata(data['px_dist'][frame])
-
-            return plot_objects['dens'], plot_objects['field'], scatter_he, line_dist
-
-        # Create animation
-        interval = config.get('animation_interval', 50)
-        anim = FuncAnimation(
-            fig, animate, frames=n_frames,
-            interval=interval, blit=False, repeat=True
-        )
-
-        return fig, anim
-
-    def save_animation_html(self, anim: FuncAnimation, output_name: str):
-        """
-        Save animation as standalone HTML file.
-
-        Args:
-            anim: FuncAnimation object
-            output_name: Base name for output file (without extension)
-        """
-        html_output = anim.to_jshtml()
-        html_path = self.output_dir / f"{output_name}.html"
-
-        with open(html_path, 'w') as f:
-            f.write(html_output)
-
-        print(f"Saved animation: {html_path}")
-
-    def plot_static_frame(
-        self,
-        frame_data: Dict,
-        config: Dict,
-        output_name: str = 'static_frame',
-        frame_index: int = 0,
-        time_omega_pe: float = 0
-    ):
-        """
-        Create static 3-panel plot for a single frame.
-
-        Args:
-            frame_data: Dict with single frame data (E_x, E_tot, n_e, x, r, particles, px_dist)
-            config: Configuration dict
-            output_name: Output filename (without extension)
-            frame_index: Frame number for labeling
-            time_omega_pe: Simulation time in omega_pe units
-        """
-        a0 = config.get('a0', 3.0)
-        density_vmin = config.get('density_vmin', 1e-4)
-        density_vmax = config.get('density_vmax', 1.0)
-        field_vmax = config.get('field_vmax', 5.0)
-        r_max = config.get('r_max_lambda0', 130)
-        px_ylim = config.get('px_ylim', (1, 10000))
-
-        fig, (ax1, ax2, ax3) = plt.subplots(
-            3, 1, figsize=(3.54, 2*3.54), dpi=200,
-            gridspec_kw={'height_ratios': [1.75, 1, 1]}
-        )
-
-        x = frame_data['x']
-        r = frame_data['r']
-
-        # Panel 1: Density + field
-        ax1.pcolormesh(
-            x, r, frame_data['n_e'],
-            cmap='Greys',
-            norm=colors.LogNorm(vmin=density_vmin, vmax=density_vmax),
-            shading='auto'
-        )
-        ax1.pcolormesh(
-            x, r, frame_data['E_tot'],
-            cmap='PuRd', vmin=0, vmax=field_vmax,
-            alpha=0.2, shading='auto'
-        )
-        ax1.set_ylabel(r"$r\: /\: \lambda_{0}$")
-        ax1.set_xlabel(r"$x\: /\: \lambda_{0}$")
-        ax1.set_ylim(r[0], r_max)
-        ax1.set_title(
-            f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {time_omega_pe:.0f}$",
-            loc='left', fontsize=12
-        )
-
-        # Panel 2: Phase space
-        pdata = frame_data['particles']
-        ax2.scatter(
-            pdata['x_he'], pdata['px_he'],
-            s=2, c='r', alpha=0.5, marker='.', linewidths=0
-        )
-        ax2.set_ylabel(r"$p_x\: /\: m_{e}c$")
-        ax2.set_xlabel(r"$x\: /\: \lambda_{0}$")
-        ax2.set_ylim(px_ylim)
+        # Update Panel 2: phase space
+        pdata = data['particles'][frame]
+        if pdata['x_he'].size and pdata['px_he'].size:
+            he_data = np.column_stack((pdata['x_he'], pdata['px_he']))
+            scatter_he.set_offsets(he_data)
+        else:
+            scatter_he.set_offsets(np.empty((0, 2)))
         ax2.set_xlim(x[0], x[-1])
-        ax2.legend(handles=[Line2D([0], [0], color='red', lw=1, label='Plasma e-')],
-                  frameon=True, framealpha=0, loc="upper left")
 
-        # Panel 3: Momentum distribution
-        ax3.plot(frame_data['px_centers'], frame_data['px_dist'],
-                color='red', label='Plasma e-')
-        ax3.set_xlabel(r"$p_x\: /\: m_e c$")
-        ax3.set_ylabel(r"$dN\:/\:dp_x$")
-        ax3.set_xlim(frame_data['px_centers'][0], frame_data['px_centers'][-1])
-        ax3.set_ylim(0, np.max(frame_data['px_dist']) * 1.1)
-        ax3.legend(frameon=True, framealpha=0, loc="upper right")
+        # Update Panel 3: momentum distribution
+        line_dist.set_ydata(data['px_dist'][frame])
 
-        fig.tight_layout()
+        return plot_objects['dens'], plot_objects['field'], scatter_he, line_dist
 
-        # Save
-        output_path = self.output_dir / f"{output_name}.png"
-        plt.savefig(output_path, dpi=200, bbox_inches='tight')
-        plt.close(fig)
+    # Create animation
+    interval = config.get('animation_interval', 50)
+    anim = FuncAnimation(
+        fig, animate, frames=n_frames,
+        interval=interval, blit=False, repeat=True
+    )
 
-        print(f"Saved static frame: {output_path}")
+    return fig, anim
+
+
+def save_animation_html(anim, output_path):
+    """
+    Save animation as standalone HTML file.
+
+    Args:
+        anim: FuncAnimation object
+        output_path: Full path for output HTML file
+    """
+    html_output = anim.to_jshtml()
+    with open(output_path, 'w') as f:
+        f.write(html_output)
+    print(f"Saved animation: {output_path}")

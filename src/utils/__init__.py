@@ -1,6 +1,5 @@
 """Utility functions and helpers"""
 
-from .synthetic_data import generate_epoch_lwfa_data
 from .physics import (
     compute_derived_quantities,
     compute_laser_parameters,
@@ -19,7 +18,6 @@ from .hpc import (
 )
 
 __all__ = [
-    'generate_epoch_lwfa_data',
     'compute_derived_quantities',
     'compute_laser_parameters',
     'compute_plasma_parameters',
