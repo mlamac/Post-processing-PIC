@@ -33,6 +33,9 @@ CONFIG = {
     'efield_pattern': 'E_field{:04d}.sdf',
     'ener_pattern': 'ener{:04d}.sdf',
 
+    # Particle species name in SDF files
+    'species': 'He_electron',
+
     # Processing options
     'downsample_x': 10,             # Spatial downsampling factor (x)
     'downsample_r': 1,              # Spatial downsampling factor (r)
@@ -218,6 +221,23 @@ def load_frame_data(index, params, config):
         data_dens = sh.getdata('dens{:04d}.sdf'.format(index))
         data_ener = sh.getdata(config['ener_pattern'].format(index))
 
+        # Validate required fields exist
+        validate_sdf_fields(data_E, [
+            'Electric_Field_Modes_Erm_real', 'Electric_Field_Modes_Erm_imag',
+            'Electric_Field_Modes_Exm_real', 'Electric_Field_Modes_Exm_imag',
+            'Grid_Grid_mid'
+        ], f'E_field{index:04d}.sdf')
+
+        validate_sdf_fields(data_dens, ['Derived_Number_Density_Subset_total_e'],
+                            f'dens{index:04d}.sdf')
+
+        species = config['species']
+        validate_sdf_fields(data_ener, [
+            f'Grid_Particles_{species}',
+            f'Particles_Px_{species}',
+            f'Particles_Weight_{species}'
+        ], f'ener{index:04d}.sdf')
+
         # Reconstruct transverse fields from modes
         # E_y at theta=0 (y-direction)
         E_y = reconstruct_field_from_modes(
@@ -254,10 +274,10 @@ def load_frame_data(index, params, config):
         ds_x = config['downsample_x']
         ds_r = config['downsample_r']
 
-        # Particle data (He_electron species)
-        x_he = np.squeeze(data_ener.Grid_Particles_He_electron.data[0]) / params['lambda0']
-        px_he = np.squeeze(data_ener.Particles_Px_He_electron.data) / (M_E * C_LIGHT)
-        w_he = np.squeeze(data_ener.Particles_Weight_He_electron.data)
+        # Particle data (configurable species)
+        x_he = np.squeeze(getattr(data_ener, f'Grid_Particles_{species}').data[0]) / params['lambda0']
+        px_he = np.squeeze(getattr(data_ener, f'Particles_Px_{species}').data) / (M_E * C_LIGHT)
+        w_he = np.squeeze(getattr(data_ener, f'Particles_Weight_{species}').data)
 
         return {
             'E_x': E_x[::ds_x, ::ds_r].T,
@@ -291,6 +311,43 @@ def progress_bar(current, total, prefix='Progress'):
     print(f'\r{prefix}: [{bar}] {pct:.1f}% ({current}/{total})', end='', flush=True)
     if current == total:
         print()  # Newline at end
+
+
+def validate_config(config):
+    """
+    Validate that all required CONFIG keys exist.
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    required = [
+        'lambda0_um', 'a0', 'n_over_nc',
+        'dens_pattern', 'efield_pattern', 'ener_pattern',
+        'species', 'downsample_x', 'downsample_r',
+        'n_px_bins', 'px_min', 'px_max',
+        'output_dir', 'output_prefix'
+    ]
+    missing = [k for k in required if k not in config]
+    if missing:
+        return False, f"Missing required config keys: {', '.join(missing)}"
+    return True, ""
+
+
+def validate_sdf_fields(data, required_fields, file_desc):
+    """
+    Check that required SDF field names exist in loaded data.
+
+    Args:
+        data: Loaded SDF data object
+        required_fields: List of field names that must exist
+        file_desc: Description of file for error messages
+
+    Raises:
+        ValueError: If any required field is missing
+    """
+    missing = [f for f in required_fields if not hasattr(data, f)]
+    if missing:
+        raise ValueError(f"{file_desc} missing fields: {', '.join(missing)}")
 
 
 # =============================================================================
@@ -484,6 +541,12 @@ def main():
     print("=" * 60)
     print("EPOCH Quasi-3D LWFA Post-Processing")
     print("=" * 60)
+
+    # Validate configuration
+    valid, msg = validate_config(CONFIG)
+    if not valid:
+        print(f"ERROR: {msg}")
+        sys.exit(1)
 
     # Compute derived quantities
     params = compute_derived_quantities(CONFIG)
