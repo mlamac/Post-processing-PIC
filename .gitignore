@@ -39,6 +39,7 @@ ENV/
 
 # Output files
 output/
+post-process-output/
 *.png
 *.html
 *.pdf
