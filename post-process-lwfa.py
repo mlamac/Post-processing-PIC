@@ -33,6 +33,9 @@ CONFIG = {
     'efield_pattern': 'E_field{:04d}.sdf',
     'ener_pattern': 'ener{:04d}.sdf',
 
+    # Particle species name in SDF files
+    'species': 'He_electron',
+
     # Processing options
     'downsample_x': 10,             # Spatial downsampling factor (x)
     'downsample_r': 1,              # Spatial downsampling factor (r)
@@ -48,6 +51,9 @@ CONFIG = {
     'field_vmax': 5.0,              # Max for transverse field plot
     'r_max_lambda0': 130,           # Max r for plotting (in lambda0 units)
     'px_ylim': (1, 10000),          # Phase space y-axis limits
+
+    # Phase space scatter density coloring
+    'ps_density_bins': (100, 100),  # Bins for density computation (x, px)
 
     # Animation settings
     'dumpstep_fs': 160,              # Time between dumps in femtoseconds
@@ -73,8 +79,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from matplotlib.animation import FuncAnimation
-from matplotlib.lines import Line2D
 import scipy.ndimage
+import time
+import contextlib
+import io
 
 # Import sdf_helper with error handling
 try:
@@ -213,10 +221,28 @@ def load_frame_data(index, params, config):
         Dict with field, density, and particle data, or None if failed
     """
     try:
-        # Load SDF files
-        data_E = sh.getdata(config['efield_pattern'].format(index))
-        data_dens = sh.getdata('dens{:04d}.sdf'.format(index))
-        data_ener = sh.getdata(config['ener_pattern'].format(index))
+        # Load SDF files (silence verbose sdf_helper output)
+        with contextlib.redirect_stdout(io.StringIO()):
+            data_E = sh.getdata(config['efield_pattern'].format(index))
+            data_dens = sh.getdata('dens{:04d}.sdf'.format(index))
+            data_ener = sh.getdata(config['ener_pattern'].format(index))
+
+        # Validate required fields exist
+        validate_sdf_fields(data_E, [
+            'Electric_Field_Modes_Erm_real', 'Electric_Field_Modes_Erm_imag',
+            'Electric_Field_Modes_Exm_real', 'Electric_Field_Modes_Exm_imag',
+            'Grid_Grid_mid'
+        ], f'E_field{index:04d}.sdf')
+
+        validate_sdf_fields(data_dens, ['Derived_Number_Density_Subset_total_e'],
+                            f'dens{index:04d}.sdf')
+
+        species = config['species']
+        validate_sdf_fields(data_ener, [
+            f'Grid_Particles_{species}',
+            f'Particles_Px_{species}',
+            f'Particles_Weight_{species}'
+        ], f'ener{index:04d}.sdf')
 
         # Reconstruct transverse fields from modes
         # E_y at theta=0 (y-direction)
@@ -254,10 +280,10 @@ def load_frame_data(index, params, config):
         ds_x = config['downsample_x']
         ds_r = config['downsample_r']
 
-        # Particle data (He_electron species)
-        x_he = np.squeeze(data_ener.Grid_Particles_He_electron.data[0]) / params['lambda0']
-        px_he = np.squeeze(data_ener.Particles_Px_He_electron.data) / (M_E * C_LIGHT)
-        w_he = np.squeeze(data_ener.Particles_Weight_He_electron.data)
+        # Particle data (configurable species)
+        x_he = np.squeeze(getattr(data_ener, f'Grid_Particles_{species}').data[0]) / params['lambda0']
+        px_he = np.squeeze(getattr(data_ener, f'Particles_Px_{species}').data) / (M_E * C_LIGHT)
+        w_he = np.squeeze(getattr(data_ener, f'Particles_Weight_{species}').data)
 
         return {
             'E_x': E_x[::ds_x, ::ds_r].T,
@@ -282,15 +308,88 @@ def compute_momentum_histogram(px, weights, bins):
     return hist
 
 
-def progress_bar(current, total, prefix='Progress'):
-    """Simple text progress bar for HPC jobs."""
+def compute_particle_density(x, px, weights, n_bins=(100, 100)):
+    """
+    Compute local phase space density at each particle position.
+
+    Uses 2D weighted histogram with fast bin lookup.
+
+    Args:
+        x: Particle x positions
+        px: Particle momenta
+        weights: Particle weights
+        n_bins: Tuple of (n_x_bins, n_px_bins) for histogram
+
+    Returns:
+        Array of density values at each particle position
+    """
+    if len(x) == 0:
+        return np.array([])
+
+    # Create 2D weighted histogram
+    hist, x_edges, px_edges = np.histogram2d(
+        x, px, bins=n_bins, weights=weights
+    )
+
+    # Find bin indices for each particle (clip to valid range)
+    x_idx = np.clip(np.digitize(x, x_edges) - 1, 0, n_bins[0] - 1)
+    px_idx = np.clip(np.digitize(px, px_edges) - 1, 0, n_bins[1] - 1)
+
+    # Look up density from histogram
+    density = hist[x_idx, px_idx]
+
+    return density
+
+
+def progress_bar(current, total, prefix='Progress', suffix=''):
+    """Simple text progress bar for HPC jobs with optional suffix."""
     pct = 100 * current / total
     bar_len = 40
     filled = int(bar_len * current / total)
     bar = '=' * filled + '-' * (bar_len - filled)
-    print(f'\r{prefix}: [{bar}] {pct:.1f}% ({current}/{total})', end='', flush=True)
+    msg = f'\r{prefix}: [{bar}] {pct:.1f}% ({current}/{total})'
+    if suffix:
+        msg += f' {suffix}'
+    print(msg, end='', flush=True)
     if current == total:
         print()  # Newline at end
+
+
+def validate_config(config):
+    """
+    Validate that all required CONFIG keys exist.
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    required = [
+        'lambda0_um', 'a0', 'n_over_nc',
+        'dens_pattern', 'efield_pattern', 'ener_pattern',
+        'species', 'downsample_x', 'downsample_r',
+        'n_px_bins', 'px_min', 'px_max',
+        'output_dir', 'output_prefix'
+    ]
+    missing = [k for k in required if k not in config]
+    if missing:
+        return False, f"Missing required config keys: {', '.join(missing)}"
+    return True, ""
+
+
+def validate_sdf_fields(data, required_fields, file_desc):
+    """
+    Check that required SDF field names exist in loaded data.
+
+    Args:
+        data: Loaded SDF data object
+        required_fields: List of field names that must exist
+        file_desc: Description of file for error messages
+
+    Raises:
+        ValueError: If any required field is missing
+    """
+    missing = [f for f in required_fields if not hasattr(data, f)]
+    if missing:
+        raise ValueError(f"{file_desc} missing fields: {', '.join(missing)}")
 
 
 # =============================================================================
@@ -338,6 +437,7 @@ def process_all_frames(indices, params, config):
         particle_data.append({
             'x_he': frame['x_he'],
             'px_he': frame['px_he'],
+            'w_he': frame['w_he'],
         })
 
         # Compute momentum histogram
@@ -359,26 +459,61 @@ def process_all_frames(indices, params, config):
 
 def create_animation(data, params, config):
     """
-    Create 3-panel animation figure.
+    Create 2-panel animation figure.
 
-    Panel 1: 2D density and field (pcolormesh)
-    Panel 2: Longitudinal phase space (scatter)
-    Panel 3: Momentum distribution (line plot)
+    Panel 1: 2D density and laser field (pcolormesh) with stacked colorbars
+    Panel 2: Longitudinal phase space (density-colored scatter) with momentum lineout
     """
     n_frames = len(data['x'])
     dumpstep = params['dumpstep']
     a0 = config['a0']
+    omega_ratio = 1.0 / np.sqrt(config['n_over_nc'])  # omega_0 / omega_pe
 
-    # Create figure with 3 subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3, 1, figsize=(3.54, 2*3.54), dpi=200,
-        gridspec_kw={'height_ratios': [1.75, 1, 1]}
-    )
+    # Pre-compute particle densities for coloring
+    print("  Computing phase space densities...")
+    particle_densities = []
+    n_frames = len(data['particles'])
+    for i, pdata in enumerate(data['particles']):
+        progress_bar(i + 1, n_frames, 'Densities')
+        if pdata['x_he'].size and pdata['px_he'].size:
+            dens = compute_particle_density(
+                pdata['x_he'], pdata['px_he'], pdata['w_he'],
+                n_bins=config.get('ps_density_bins', (100, 100))
+            )
+            particle_densities.append(dens)
+        else:
+            particle_densities.append(np.array([]))
+
+    # Find global max for consistent color scaling
+    max_dens = max((d.max() for d in particle_densities if d.size > 0), default=1.0)
+
+    # Max histogram value for lineout scaling
+    max_hist = max(np.max(h) for h in data['px_dist'] if len(h) > 0)
+
+    # Uniform font size (larger for readability)
+    fontsize = MEDIUM_SIZE
+
+    # Create figure with GridSpec - 4 rows for stacked colorbars
+    # Rows 0-1: Panel 1 with density colorbar (row 0) and field colorbar (row 1)
+    # Rows 2-3: Panel 2 with phase space colorbar
+    fig = plt.figure(figsize=(6.0, 7.0), dpi=200)
+    gs = fig.add_gridspec(4, 2, width_ratios=[1, 0.04],
+                          height_ratios=[1, 1, 1, 1],
+                          wspace=0.03, hspace=0.1)
+
+    # Panel 1 spans rows 0-1
+    ax1 = fig.add_subplot(gs[0:2, 0])
+    cax_dens = fig.add_subplot(gs[0, 1])    # Density colorbar (top half)
+    cax_field = fig.add_subplot(gs[1, 1])   # Field colorbar (bottom half)
+
+    # Panel 2 spans rows 2-3
+    ax2 = fig.add_subplot(gs[2:4, 0])
+    cax_ps = fig.add_subplot(gs[2:4, 1])    # Phase space colorbar
 
     # Initial data
     x0, r0 = data['x'][0], data['r'][0]
 
-    # Panel 1: 2D density and field
+    # Panel 1: 2D density and laser field
     plot_dens = ax1.pcolormesh(
         x0, r0, data['n_e'][0],
         cmap='Greys',
@@ -390,42 +525,58 @@ def create_animation(data, params, config):
         cmap='PuRd', vmin=0, vmax=config['field_vmax'],
         alpha=0.2, shading='auto'
     )
-    ax1.set_ylabel(r"$r\: /\: \lambda_{0}$")
-    ax1.set_xlabel(r"$x\: /\: \lambda_{0}$")
+    ax1.set_ylabel(r"$r\:/\:\lambda_{0}$", fontsize=fontsize)
+    ax1.set_xlabel(r"$x\:/\:\lambda_{0}$", fontsize=fontsize)
+    ax1.tick_params(axis='both', labelsize=fontsize)
     ax1.set_ylim(r0[0], config['r_max_lambda0'])
     ax1.set_title(
-        f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {0:.0f}$",
-        loc='left', fontsize=12
+        f"$a_0 = {a0:.1f},\\quad \\omega_0\\:/\\:\\omega_{{pe}} = {omega_ratio:.0f},\\quad \\omega_{{pe}} t = {0:.0f}$",
+        loc='left', fontsize=fontsize
     )
 
-    # Panel 2: Phase space scatter
+    # Colorbars for Panel 1 (stacked vertically)
+    cbar_dens = fig.colorbar(plot_dens, cax=cax_dens)
+    cbar_dens.set_label(r'$n_e\:/\:n_c$', fontsize=fontsize)
+    cbar_dens.ax.tick_params(labelsize=fontsize)
+
+    cbar_field = fig.colorbar(plot_field, cax=cax_field)
+    cbar_field.set_label(r'$|E_\perp|\:/\:E_0$', fontsize=fontsize)
+    cbar_field.ax.tick_params(labelsize=fontsize)
+
+    # Panel 2: Phase space scatter with density coloring
     pdata = data['particles'][0]
     scatter_he = ax2.scatter(
         pdata['x_he'], pdata['px_he'],
-        s=2, c='r', alpha=0.5, marker='.', linewidths=0
+        s=2, c=particle_densities[0], cmap='jet',
+        norm=colors.LogNorm(vmin=max_dens*1e-4, vmax=max_dens),
+        marker='.', linewidths=0
     )
-    ax2.set_ylabel(r"$p_x\: /\: m_{e}c$")
-    ax2.set_xlabel(r"$x\: /\: \lambda_{0}$")
+    ax2.set_xlabel(r"$x\:/\:\lambda_{0}$", fontsize=fontsize)
+    ax2.set_ylabel(r"$p_x\:/\:m_{e}c$", fontsize=fontsize)
+    ax2.tick_params(axis='both', labelsize=fontsize)
     ax2.set_ylim(config['px_ylim'])
     ax2.set_xlim(x0[0], x0[-1])
 
-    legend_handles = [Line2D([0], [0], color='red', lw=1, label='Plasma e-')]
-    ax2.legend(handles=legend_handles, frameon=True, framealpha=0, loc="upper left")
+    # Colorbar for phase space density
+    cbar_ps = fig.colorbar(scatter_he, cax=cax_ps)
+    cbar_ps.set_label(r'$f(x,\:p_x)$', fontsize=fontsize)
+    cbar_ps.ax.tick_params(labelsize=fontsize)
 
-    # Panel 3: Momentum distribution
+    # Create twin axis for momentum distribution lineout
+    ax2_twin = ax2.twiny()  # Share y-axis
+
+    # Plot momentum distribution as vertical profile (red, no labels/ticks)
     px_centers = data['px_centers']
-    line_dist, = ax3.plot(px_centers, data['px_dist'][0], color='red', label='Plasma e-')
-    ax3.set_xlabel(r"$p_x\: /\: m_e c$")
-    ax3.set_ylabel(r"$dN\:/\:dp_x$")
-    ax3.set_xlim(px_centers[0], px_centers[-1])
+    line_dist, = ax2_twin.plot(data['px_dist'][0], px_centers, color='red', lw=1.5, alpha=0.8)
+    ax2_twin.set_xlim(0, max_hist * 0.5)
 
-    # Auto-scale y-axis based on max histogram value
-    max_hist = max(np.max(h) for h in data['px_dist'] if len(h) > 0)
-    ax3.set_ylim(0, max_hist * 0.5)
+    # Hide the twin axis labels and ticks
+    ax2_twin.set_xticklabels([])
+    ax2_twin.set_xticks([])
+    ax2_twin.spines['top'].set_visible(False)
 
-    ax3.legend(frameon=True, framealpha=0, loc="upper right")
-
-    fig.tight_layout()
+    # Adjust layout with right margin for colorbar labels
+    fig.subplots_adjust(left=0.12, right=0.82, top=0.95, bottom=0.08, hspace=0.25)
 
     # Store plot objects that need to be recreated each frame
     plot_objects = {'dens': plot_dens, 'field': plot_field}
@@ -435,7 +586,6 @@ def create_animation(data, params, config):
         r = data['r'][frame]
 
         # Update Panel 1: density and field
-        # Remove old pcolormesh and create new ones (needed for moving window)
         plot_objects['dens'].remove()
         plot_objects['field'].remove()
 
@@ -453,21 +603,23 @@ def create_animation(data, params, config):
 
         ax1.set_xlim(x[0], x[-1])
         ax1.set_title(
-            f"$a_{{0}} = {a0:.1f},\\ \\omega_{{pe}} t = {frame * dumpstep:.0f}$",
-            loc='left', fontsize=12
+            f"$a_0 = {a0:.1f},\\quad \\omega_0\\:/\\:\\omega_{{pe}} = {omega_ratio:.0f},\\quad \\omega_{{pe}} t = {frame * dumpstep:.0f}$",
+            loc='left', fontsize=fontsize
         )
 
-        # Update Panel 2: phase space
+        # Update Panel 2: phase space with density colors
         pdata = data['particles'][frame]
         if pdata['x_he'].size and pdata['px_he'].size:
             he_data = np.column_stack((pdata['x_he'], pdata['px_he']))
             scatter_he.set_offsets(he_data)
+            scatter_he.set_array(particle_densities[frame])
         else:
             scatter_he.set_offsets(np.empty((0, 2)))
+            scatter_he.set_array(np.array([]))
         ax2.set_xlim(x[0], x[-1])
 
-        # Update Panel 3: momentum distribution
-        line_dist.set_ydata(data['px_dist'][frame])
+        # Update momentum lineout
+        line_dist.set_xdata(data['px_dist'][frame])
 
         return plot_objects['dens'], plot_objects['field'], scatter_he, line_dist
 
@@ -481,9 +633,17 @@ def create_animation(data, params, config):
 
 def main():
     """Main entry point."""
+    start_time = time.time()
+
     print("=" * 60)
     print("EPOCH Quasi-3D LWFA Post-Processing")
     print("=" * 60)
+
+    # Validate configuration
+    valid, msg = validate_config(CONFIG)
+    if not valid:
+        print(f"ERROR: {msg}")
+        sys.exit(1)
 
     # Compute derived quantities
     params = compute_derived_quantities(CONFIG)
@@ -505,12 +665,21 @@ def main():
     # Create output directory
     os.makedirs(CONFIG['output_dir'], exist_ok=True)
 
-    # Process all frames
+    # Process all frames with timing
+    load_start = time.time()
     data = process_all_frames(indices, params, CONFIG)
+    load_time = time.time() - load_start
 
     if len(data['x']) == 0:
         print("ERROR: No frames were successfully processed.")
         sys.exit(1)
+
+    # Show frame statistics
+    success_count = len(data['x'])
+    total_count = len(indices)
+    print(f"  Frame loading completed in {load_time:.1f}s")
+    if success_count < total_count:
+        print(f"  WARNING: {total_count - success_count} of {total_count} frames failed to load")
 
     # Save processed data as .npy files
     print("\nSaving processed data...")
@@ -524,17 +693,29 @@ def main():
     np.save(f"{prefix}_px_dist.npy", np.stack(data['px_dist']))
     print(f"  Saved .npy data files to {CONFIG['output_dir']}/")
 
-    # Create and save animation
+    # Create animation with timing
     print("\nCreating animation...")
+    anim_start = time.time()
     fig, anim = create_animation(data, params, CONFIG)
+    anim_time = time.time() - anim_start
+    print(f"  Animation created in {anim_time:.1f}s")
 
+    # Render HTML with timing
+    print("  Rendering HTML...")
+    render_start = time.time()
     html_output = anim.to_jshtml()
+    render_time = time.time() - render_start
     html_path = f"{prefix}_animation.html"
     with open(html_path, 'w') as f:
         f.write(html_output)
+    print(f"  HTML rendered in {render_time:.1f}s")
     print(f"  Saved animation: {html_path}")
 
     plt.close(fig)
+
+    # Total processing time
+    total_time = time.time() - start_time
+    print(f"\nTotal processing time: {total_time:.1f}s")
 
     print()
     print("=" * 60)

@@ -43,11 +43,10 @@ output/
 *.html
 *.pdf
 
-# Data files (except examples)
+# Data files
 *.h5
 *.hdf5
 *.sdf
-!examples/data/.gitkeep
 
 # OS
 .DS_Store
