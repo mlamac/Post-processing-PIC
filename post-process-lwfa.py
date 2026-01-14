@@ -39,6 +39,7 @@ CONFIG = {
     # Processing options
     'downsample_x': 10,             # Spatial downsampling factor (x)
     'downsample_r': 1,              # Spatial downsampling factor (r)
+    'frame_interval': 1,            # Process every Nth frame (1 = all frames)
 
     # Momentum histogram bins
     'n_px_bins': 2000,
@@ -660,6 +661,12 @@ def main():
         print("Make sure you are running this script in the directory with SDF files.")
         sys.exit(1)
     print(f"Found {len(indices)} frames: {indices[0]:04d} to {indices[-1]:04d}")
+
+    # Apply frame interval
+    interval = CONFIG.get('frame_interval', 1)
+    if interval > 1:
+        indices = indices[::interval]
+        print(f"Using every {interval}th frame: {len(indices)} frames selected")
     print()
 
     # Create output directory
