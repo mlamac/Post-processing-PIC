@@ -37,7 +37,7 @@ CONFIG = {
     'species': 'He_electron',
 
     # Processing options
-    'downsample_x': 10,             # Spatial downsampling factor (x)
+    'downsample_x': 1,             # Spatial downsampling factor (x)
     'downsample_r': 1,              # Spatial downsampling factor (r)
     'frame_interval': 1,            # Process every Nth frame (1 = all frames)
 
@@ -53,8 +53,9 @@ CONFIG = {
     'r_max_lambda0': 130,           # Max r for plotting (in lambda0 units)
     'px_ylim': (1, 10000),          # Phase space y-axis limits
 
-    # Phase space scatter density coloring
-    'ps_density_bins': (100, 100),  # Bins for density computation (x, px)
+    # Phase space 2D histogram settings
+    'ps_x_bins': 1000,               # Number of x bins for phase space histogram
+    'ps_px_bins': 1000,              # Number of px bins for phase space histogram
 
     # Animation settings
     'dumpstep_fs': 160,              # Time between dumps in femtoseconds
@@ -79,6 +80,7 @@ import re
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
+import matplotlib.ticker as ticker
 from matplotlib.animation import FuncAnimation
 import scipy.ndimage
 import time
@@ -309,39 +311,6 @@ def compute_momentum_histogram(px, weights, bins):
     return hist
 
 
-def compute_particle_density(x, px, weights, n_bins=(100, 100)):
-    """
-    Compute local phase space density at each particle position.
-
-    Uses 2D weighted histogram with fast bin lookup.
-
-    Args:
-        x: Particle x positions
-        px: Particle momenta
-        weights: Particle weights
-        n_bins: Tuple of (n_x_bins, n_px_bins) for histogram
-
-    Returns:
-        Array of density values at each particle position
-    """
-    if len(x) == 0:
-        return np.array([])
-
-    # Create 2D weighted histogram
-    hist, x_edges, px_edges = np.histogram2d(
-        x, px, bins=n_bins, weights=weights
-    )
-
-    # Find bin indices for each particle (clip to valid range)
-    x_idx = np.clip(np.digitize(x, x_edges) - 1, 0, n_bins[0] - 1)
-    px_idx = np.clip(np.digitize(px, px_edges) - 1, 0, n_bins[1] - 1)
-
-    # Look up density from histogram
-    density = hist[x_idx, px_idx]
-
-    return density
-
-
 def progress_bar(current, total, prefix='Progress', suffix=''):
     """Simple text progress bar for HPC jobs with optional suffix."""
     pct = 100 * current / total
@@ -470,23 +439,42 @@ def create_animation(data, params, config):
     a0 = config['a0']
     omega_ratio = 1.0 / np.sqrt(config['n_over_nc'])  # omega_0 / omega_pe
 
-    # Pre-compute particle densities for coloring
-    print("  Computing phase space densities...")
-    particle_densities = []
+    # Pre-compute 2D phase space histograms for fast rendering
+    print("  Computing phase space histograms...")
+    ps_histograms = []
+    ps_x_edges_list = []
+    ps_px_edges_list = []
     n_frames = len(data['particles'])
+    n_x_bins = config.get('ps_x_bins', 400)
+    n_px_bins = config.get('ps_px_bins', 200)
+    px_ylim = config['px_ylim']
+
+    # Linear px bins for linear y-axis
+    px_bin_edges = np.linspace(px_ylim[0], px_ylim[1], n_px_bins + 1)
+
     for i, pdata in enumerate(data['particles']):
-        progress_bar(i + 1, n_frames, 'Densities')
-        if pdata['x_he'].size and pdata['px_he'].size:
-            dens = compute_particle_density(
-                pdata['x_he'], pdata['px_he'], pdata['w_he'],
-                n_bins=config.get('ps_density_bins', (100, 100))
+        progress_bar(i + 1, n_frames, 'Histograms')
+        x_he, px_he, w_he = pdata['x_he'], pdata['px_he'], pdata['w_he']
+
+        if x_he.size and px_he.size:
+            # Create x bins based on data range for this frame
+            x_min, x_max = x_he.min(), x_he.max()
+            x_bin_edges = np.linspace(x_min, x_max, n_x_bins + 1)
+
+            # Compute weighted 2D histogram
+            hist, _, _ = np.histogram2d(
+                x_he, px_he, bins=[x_bin_edges, px_bin_edges], weights=w_he
             )
-            particle_densities.append(dens)
+            ps_histograms.append(hist.T)  # Transpose for correct orientation
+            ps_x_edges_list.append(x_bin_edges)
+            ps_px_edges_list.append(px_bin_edges)
         else:
-            particle_densities.append(np.array([]))
+            ps_histograms.append(np.zeros((n_px_bins, n_x_bins)))
+            ps_x_edges_list.append(np.linspace(0, 1, n_x_bins + 1))
+            ps_px_edges_list.append(px_bin_edges)
 
     # Find global max for consistent color scaling
-    max_dens = max((d.max() for d in particle_densities if d.size > 0), default=1.0)
+    max_dens = max((h.max() for h in ps_histograms if h.max() > 0), default=1.0)
 
     # Max histogram value for lineout scaling
     max_hist = max(np.max(h) for h in data['px_dist'] if len(h) > 0)
@@ -497,10 +485,10 @@ def create_animation(data, params, config):
     # Create figure with GridSpec - 4 rows for stacked colorbars
     # Rows 0-1: Panel 1 with density colorbar (row 0) and field colorbar (row 1)
     # Rows 2-3: Panel 2 with phase space colorbar
-    fig = plt.figure(figsize=(6.0, 7.0), dpi=200)
+    fig = plt.figure(figsize=(3.54, 3.54), dpi=200, constrained_layout=True)
     gs = fig.add_gridspec(4, 2, width_ratios=[1, 0.04],
-                          height_ratios=[1, 1, 1, 1],
-                          wspace=0.03, hspace=0.1)
+                          height_ratios=[1, 1, 0.5, 0.5],
+                          wspace=0.01, hspace=0.05)
 
     # Panel 1 spans rows 0-1
     ax1 = fig.add_subplot(gs[0:2, 0])
@@ -510,6 +498,10 @@ def create_animation(data, params, config):
     # Panel 2 spans rows 2-3
     ax2 = fig.add_subplot(gs[2:4, 0])
     cax_ps = fig.add_subplot(gs[2:4, 1])    # Phase space colorbar
+
+    # Use fixed number of ticks to prevent layout shifts during animation
+    ax1.xaxis.set_major_locator(ticker.MaxNLocator(nbins=4, integer=True))
+    ax2.xaxis.set_major_locator(ticker.MaxNLocator(nbins=4, integer=True))
 
     # Initial data
     x0, r0 = data['x'][0], data['r'][0]
@@ -527,7 +519,7 @@ def create_animation(data, params, config):
         alpha=0.2, shading='auto'
     )
     ax1.set_ylabel(r"$r\:/\:\lambda_{0}$", fontsize=fontsize)
-    ax1.set_xlabel(r"$x\:/\:\lambda_{0}$", fontsize=fontsize)
+    #ax1.set_xlabel(r"$x\:/\:\lambda_{0}$", fontsize=fontsize)
     ax1.tick_params(axis='both', labelsize=fontsize)
     ax1.set_ylim(r0[0], config['r_max_lambda0'])
     ax1.set_title(
@@ -537,30 +529,29 @@ def create_animation(data, params, config):
 
     # Colorbars for Panel 1 (stacked vertically)
     cbar_dens = fig.colorbar(plot_dens, cax=cax_dens)
-    cbar_dens.set_label(r'$n_e\:/\:n_c$', fontsize=fontsize)
+    cbar_dens.set_label(r'$n_{\mathrm{e}}\:/\:n_c$', fontsize=fontsize)
     cbar_dens.ax.tick_params(labelsize=fontsize)
 
     cbar_field = fig.colorbar(plot_field, cax=cax_field)
     cbar_field.set_label(r'$|E_\perp|\:/\:E_0$', fontsize=fontsize)
     cbar_field.ax.tick_params(labelsize=fontsize)
 
-    # Panel 2: Phase space scatter with density coloring
-    pdata = data['particles'][0]
-    scatter_he = ax2.scatter(
-        pdata['x_he'], pdata['px_he'],
-        s=2, c=particle_densities[0], cmap='jet',
+    # Panel 2: Phase space as 2D histogram (much faster than scatter)
+    ps_plot = ax2.pcolormesh(
+        ps_x_edges_list[0], ps_px_edges_list[0], ps_histograms[0],
+        cmap='jet',
         norm=colors.LogNorm(vmin=max_dens*1e-4, vmax=max_dens),
-        marker='.', linewidths=0
+        shading='flat'
     )
     ax2.set_xlabel(r"$x\:/\:\lambda_{0}$", fontsize=fontsize)
-    ax2.set_ylabel(r"$p_x\:/\:m_{e}c$", fontsize=fontsize)
+    ax2.set_ylabel(r"$p_{x}\:/\:m_{\mathrm{e}}c$", fontsize=fontsize)
     ax2.tick_params(axis='both', labelsize=fontsize)
     ax2.set_ylim(config['px_ylim'])
-    ax2.set_xlim(x0[0], x0[-1])
+    ax2.set_xlim(ps_x_edges_list[0][0], ps_x_edges_list[0][-1])
 
     # Colorbar for phase space density
-    cbar_ps = fig.colorbar(scatter_he, cax=cax_ps)
-    cbar_ps.set_label(r'$f(x,\:p_x)$', fontsize=fontsize)
+    cbar_ps = fig.colorbar(ps_plot, cax=cax_ps)
+    cbar_ps.set_label(r'$\mathrm{d}^{2}N_{\mathrm{e}}\:/\:\mathrm{d}x\:\mathrm{d}p_{x}$', fontsize=fontsize)
     cbar_ps.ax.tick_params(labelsize=fontsize)
 
     # Create twin axis for momentum distribution lineout
@@ -569,18 +560,15 @@ def create_animation(data, params, config):
     # Plot momentum distribution as vertical profile (red, no labels/ticks)
     px_centers = data['px_centers']
     line_dist, = ax2_twin.plot(data['px_dist'][0], px_centers, color='red', lw=1.5, alpha=0.8)
-    ax2_twin.set_xlim(0, max_hist * 0.5)
+    ax2_twin.set_xlim(0, max_hist * 1.1)
 
     # Hide the twin axis labels and ticks
     ax2_twin.set_xticklabels([])
     ax2_twin.set_xticks([])
     ax2_twin.spines['top'].set_visible(False)
 
-    # Adjust layout with right margin for colorbar labels
-    fig.subplots_adjust(left=0.12, right=0.82, top=0.95, bottom=0.08, hspace=0.25)
-
     # Store plot objects that need to be recreated each frame
-    plot_objects = {'dens': plot_dens, 'field': plot_field}
+    plot_objects = {'dens': plot_dens, 'field': plot_field, 'ps': ps_plot}
 
     def animate(frame):
         x = data['x'][frame]
@@ -608,21 +596,20 @@ def create_animation(data, params, config):
             loc='left', fontsize=fontsize
         )
 
-        # Update Panel 2: phase space with density colors
-        pdata = data['particles'][frame]
-        if pdata['x_he'].size and pdata['px_he'].size:
-            he_data = np.column_stack((pdata['x_he'], pdata['px_he']))
-            scatter_he.set_offsets(he_data)
-            scatter_he.set_array(particle_densities[frame])
-        else:
-            scatter_he.set_offsets(np.empty((0, 2)))
-            scatter_he.set_array(np.array([]))
-        ax2.set_xlim(x[0], x[-1])
+        # Update Panel 2: phase space histogram
+        plot_objects['ps'].remove()
+        plot_objects['ps'] = ax2.pcolormesh(
+            ps_x_edges_list[frame], ps_px_edges_list[frame], ps_histograms[frame],
+            cmap='jet',
+            norm=colors.LogNorm(vmin=max_dens*1e-4, vmax=max_dens),
+            shading='flat'
+        )
+        ax2.set_xlim(ps_x_edges_list[frame][0], ps_x_edges_list[frame][-1])
 
         # Update momentum lineout
         line_dist.set_xdata(data['px_dist'][frame])
 
-        return plot_objects['dens'], plot_objects['field'], scatter_he, line_dist
+        return plot_objects['dens'], plot_objects['field'], plot_objects['ps'], line_dist
 
     anim = FuncAnimation(
         fig, animate, frames=n_frames,
